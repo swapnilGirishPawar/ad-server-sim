@@ -1,0 +1,25 @@
+services:
+  simulator:
+    build: .
+    container_name: ad-server-sim
+    ports:
+      - "8090:8090"
+    environment:
+      # host.docker.internal lets the container reach an ad server running on the
+      # host (Docker Desktop on Win/Mac; Linux uses the extra_hosts mapping below).
+      AD_SERVER_URL: ${AD_SERVER_URL:-http://host.docker.internal:8001}
+      AD_SERVER_EMAIL: ${AD_SERVER_EMAIL:-dev@localhost.com}
+      AD_SERVER_PASSWORD: ${AD_SERVER_PASSWORD:-admin123}
+      SIM_DB_PATH: /data/sim.db
+      REQUESTS_PER_SECOND: ${REQUESTS_PER_SECOND:-50}
+      CONCURRENCY: ${CONCURRENCY:-10}
+      DEFAULT_CTR: ${DEFAULT_CTR:-0.03}
+      DEFAULT_IMPRESSION_RATE: ${DEFAULT_IMPRESSION_RATE:-0.9}
+      SERVE_PROTOCOLS: ${SERVE_PROTOCOLS:-vast}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - sim-data:/data
+
+volumes:
+  sim-data:

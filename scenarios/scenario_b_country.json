@@ -1,0 +1,8 @@
+{
+  "scenario": "B",
+  "title": "Country Targeting (India only)",
+  "request": { "scenario": "B" },
+  "setup": "Creates a dominant-CPM campaign targeted to country IN only, then sends equal traffic from IN, US and UK.",
+  "expected_standard_behaviour": "Only IN traffic receives the campaign; US and UK get no fill from it.",
+  "expected_verdict_vs_voise_adserver": "GAP — the VAST endpoint /api/v/{tag} accepts no country parameter and decide_vast_ad evaluates no geo targeting, so the campaign serves every country regardless of its IN-only target."
+}

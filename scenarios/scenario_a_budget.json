@@ -1,0 +1,8 @@
+{
+  "scenario": "A",
+  "title": "Budget Exhaustion",
+  "request": { "scenario": "A" },
+  "setup": "Creates one dominant-CPM campaign with budget == CPM, so spend/impression = CPM/1000 reaches the budget at exactly 1000 impressions. Drives 1500 requests and fires win notices to accrue spend.",
+  "expected_standard_behaviour": "The campaign stops serving once cumulative spend reaches the budget (after 1000 impressions).",
+  "expected_verdict_vs_voise_adserver": "GAP — the auction's eligibility check reads campaign.spent / daily_spent, but /track/win increments campaign.spend, and win attribution requires a line-item -> campaign link. The loop never closes, so the campaign keeps serving past its budget."
+}

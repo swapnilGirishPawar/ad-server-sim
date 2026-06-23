@@ -1,0 +1,25 @@
+{
+  "_comment": "Real output captured from this simulator against the local Voise Ad Server (2026-06-22). Verdicts are the simulator's honest assessment vs standard ad-server behaviour; GAP means the ad server does not enforce the expected rule.",
+  "results": [
+    {
+      "scenario": "C", "verdict": "PASS", "title": "Bid Competition (higher CPM should win)",
+      "actual": "Campaign B won 40, Campaign A won 0 (other campaigns: 0). Higher CPM wins as expected.",
+      "evidence": { "wins_A_lower": 0, "wins_B_higher": 40, "requests": 40 }
+    },
+    {
+      "scenario": "B", "verdict": "GAP", "title": "Country Targeting (India only)",
+      "actual": "US/UK received the IN-only campaign 20 times. The VAST endpoint accepts no country parameter and the auction evaluates no geo targeting.",
+      "evidence": { "by_country": { "IN": { "requests": 10, "served": 10 }, "US": { "requests": 10, "served": 10 }, "UK": { "requests": 10, "served": 10 } } }
+    },
+    {
+      "scenario": "D", "verdict": "GAP", "title": "Frequency Cap (3 impressions/user)",
+      "actual": "Same user served 6/6 times; 3 beyond the cap of 3. No per-user frequency capping is enforced.",
+      "evidence": { "cap": 3, "requests": 6, "served": 6, "served_after_cap": 3 }
+    },
+    {
+      "scenario": "A", "verdict": "GAP", "title": "Budget Exhaustion",
+      "actual": "Campaign continued serving after its budget should have been exhausted. Eligibility reads `spent` while wins increment `spend`; budget never closes.",
+      "evidence": { "budget": 1000, "modelled_exhaust_at_impression": 1000, "note": "spend field mismatch + line-item attribution gap" }
+    }
+  ]
+}

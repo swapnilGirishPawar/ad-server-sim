@@ -1,0 +1,8 @@
+{
+  "scenario": "C",
+  "title": "Bid Competition (higher CPM should win)",
+  "request": { "scenario": "C" },
+  "setup": "Creates two campaigns on the same placement — Campaign A and Campaign B, with B priced higher — then drives traffic and counts wins.",
+  "expected_standard_behaviour": "Higher-CPM Campaign B wins more auctions than Campaign A.",
+  "expected_verdict_vs_voise_adserver": "PASS — decide_vast_ad ranks eligible campaigns by target_cpm (descending), so the higher bid wins. This is the one core behaviour the internal auction implements correctly."
+}

@@ -1,0 +1,21 @@
+# Python
+backend/.venv/
+**/__pycache__/
+*.pyc
+backend/.pytest_cache/
+
+# SQLite data
+backend/sim*.db
+backend/sim*.db-shm
+backend/sim*.db-wal
+
+# Node / dashboard
+dashboard/node_modules/
+dashboard/dist/
+
+# Env / secrets
+**/.env
+
+# OS
+.DS_Store
+Thumbs.db

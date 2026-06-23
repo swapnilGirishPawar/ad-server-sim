@@ -1,0 +1,8 @@
+{
+  "scenario": "D",
+  "title": "Frequency Cap (3 impressions/user)",
+  "request": { "scenario": "D" },
+  "setup": "Creates a dominant-CPM campaign and sends 6 sequential requests from the SAME user_id (passed as the VAST ifa parameter).",
+  "expected_standard_behaviour": "After 3 impressions the same user is no longer served the campaign (requests 4-6 get no fill).",
+  "expected_verdict_vs_voise_adserver": "GAP — decide_vast_ad performs no per-user frequency capping, so the same user is served on every request."
+}
