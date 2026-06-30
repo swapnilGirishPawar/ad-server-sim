@@ -81,13 +81,29 @@ def _budget_of(data_json: Optional[str]) -> Optional[float]:
     return float(b) if b is not None else None
 
 
+def _pctile(sorted_vals: List[float], pct: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    if len(sorted_vals) == 1:
+        return round(sorted_vals[0], 2)
+    k = (len(sorted_vals) - 1) * pct
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return round(sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo), 2)
+
+
 async def auction_metrics(db: Database, run_id: Optional[str] = None) -> Dict[str, Any]:
     w, p = _where(run_id)
     lat_rows = await db.fetchall(f"SELECT latency_ms FROM ad_requests {w} {'AND' if w else 'WHERE'} "
                                  f"latency_ms IS NOT NULL ORDER BY latency_ms", p)
     lats = [r["latency_ms"] for r in lat_rows]
     avg = round(sum(lats) / len(lats), 2) if lats else 0.0
-    p95 = round(lats[min(len(lats) - 1, int(len(lats) * 0.95))], 2) if lats else 0.0
+
+    tot = await db.fetchone(
+        f"SELECT COUNT(*) n, SUM(CASE WHEN status_code=0 OR status_code>=500 THEN 1 ELSE 0 END) errs "
+        f"FROM ad_requests {w}", p)
+    n = (tot or {}).get("n") or 0
+    errs = (tot or {}).get("errs") or 0
 
     span = await db.fetchone(f"SELECT MIN(ts_ms) lo, MAX(ts_ms) hi, COUNT(*) n FROM ad_requests {w}", p)
     rps = 0.0
@@ -98,8 +114,85 @@ async def auction_metrics(db: Database, run_id: Optional[str] = None) -> Dict[st
                                  f"{'AND' if w else 'WHERE'} filled=1 GROUP BY winner_campaign "
                                  f"ORDER BY n DESC", p)
     return {
-        "avg_latency_ms": avg, "p95_latency_ms": p95, "requests_per_second": rps,
+        "avg_latency_ms": avg,
+        "p50_latency_ms": _pctile(lats, 0.50),
+        "p95_latency_ms": _pctile(lats, 0.95),
+        "p99_latency_ms": _pctile(lats, 0.99),
+        "requests_per_second": rps,
+        "error_rate": round(errs / n, 4) if n else 0.0,
         "win_distribution": [{"campaign": r["c"] or "(unknown)", "wins": r["n"]} for r in win_rows],
+    }
+
+
+async def fill_breakdown(db: Database, run_id: Optional[str] = None) -> Dict[str, Any]:
+    """Real vs filler vs no-fill vs error split (build prompt §5.5 / S3)."""
+    w, p = _where(run_id)
+    rows = await db.fetchall(
+        f"SELECT COALESCE(classification,'unknown') c, COUNT(*) n FROM ad_requests {w} GROUP BY c", p)
+    counts = {r["c"]: r["n"] for r in rows}
+    total = sum(counts.values())
+    return {
+        "total": total, "by_classification": counts,
+        "real": counts.get("real", 0), "filler": counts.get("filler", 0),
+        "no_fill": counts.get("no_fill", 0), "error": counts.get("error", 0),
+        "real_fill_rate": round(counts.get("real", 0) / total, 4) if total else 0.0,
+        "filler_rate": round(counts.get("filler", 0) / total, 4) if total else 0.0,
+    }
+
+
+async def findings_summary(db: Database, run_id: Optional[str] = None) -> Dict[str, Any]:
+    """All conformance findings + a per-standard scorecard."""
+    from app.conformance import scorecard
+    w, p = _where(run_id)
+    rows = await db.fetchall(f"SELECT * FROM findings {w} ORDER BY "
+                             f"CASE severity WHEN 'fail' THEN 0 WHEN 'warn' THEN 1 "
+                             f"WHEN 'info' THEN 2 ELSE 3 END, standard", p)
+    findings = [{
+        "standard": r["standard"], "spec_section": r["spec_section"], "check": r["check_id"],
+        "severity": r["severity"], "expected": r["expected"], "observed": r["observed"],
+        "endpoint": r["endpoint"], "scenario": r["scenario"],
+    } for r in rows]
+    return {"scorecard": scorecard(findings), "findings": findings}
+
+
+async def reconcile(db: Database, client, run_id: Optional[str] = None,
+                    tolerance: float = 0.05) -> Dict[str, Any]:
+    """Compare what the simulator SENT/observed against the SUT's own reports,
+    per campaign, with a within-tolerance pass/fail verdict (build prompt §4.8 / S11)."""
+    sim = {c["campaign"]: c for c in await campaign_metrics(db, run_id)}
+    rows = await db.fetchall("SELECT server_id, name FROM seed_entities WHERE kind='campaign'")
+    per_campaign = []
+    agg = {"sim_impressions": 0, "server_impressions": 0}
+    for r in rows:
+        sm = sim.get(r["name"], {})
+        srv_stats = await client.campaign_stats(r["server_id"]) or {}
+        srv_spend = await client.campaign_spend(r["server_id"]) or {}
+        sim_imp = sm.get("impressions", 0)
+        srv_imp = srv_stats.get("impressions")
+        delta = None
+        verdict = "BLOCKED"
+        if srv_imp is not None:
+            delta = srv_imp - sim_imp
+            denom = sim_imp or 1
+            verdict = "PASS" if abs(delta) / denom <= tolerance else "FAIL"
+            agg["sim_impressions"] += sim_imp
+            agg["server_impressions"] += srv_imp
+        per_campaign.append({
+            "campaign": r["name"], "sim_impressions": sim_imp, "server_impressions": srv_imp,
+            "delta": delta, "within_tolerance": verdict,
+            "sim_clicks": sm.get("clicks", 0), "server_clicks": srv_stats.get("clicks"),
+            "sim_spend": sm.get("spend", 0.0),
+            "server_spend": (srv_stats.get("spend") if srv_stats else None) or srv_spend.get("spend_total"),
+        })
+    overall_delta = agg["server_impressions"] - agg["sim_impressions"]
+    denom = agg["sim_impressions"] or 1
+    return {
+        "tolerance": tolerance, "per_campaign": per_campaign, "aggregate": agg,
+        "aggregate_delta": overall_delta,
+        "aggregate_verdict": ("PASS" if agg["server_impressions"] and abs(overall_delta) / denom <= tolerance
+                              else ("FAIL" if agg["server_impressions"] else "BLOCKED")),
+        "note": ("Server impression counts unavailable (reporting endpoints not reachable / not "
+                 "attributing) — reconciliation BLOCKED. The simulator's own counts remain authoritative."),
     }
 
 

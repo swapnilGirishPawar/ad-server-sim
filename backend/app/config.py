@@ -62,6 +62,21 @@ class Settings(BaseSettings):
     user_pool_size: int = 200
     returning_user_ratio: float = 0.6
 
+    # --- Target discovery + fake DSP --------------------------------------
+    # Read the SUT's /openapi.json on startup to repoint to live routes.
+    discover_on_start: bool = True
+    # Public URL at which THIS simulator is reachable BY THE SUT, so the SUT's
+    # auction can fan out to the built-in fake DSP. When the SUT runs on the host
+    # and the sim in Docker, the sim's published port on the host is correct.
+    sim_public_url: str = "http://localhost:8090"
+    dsp_path: str = "/dsp/bid"
+
+    # --- Conformance -------------------------------------------------------
+    # Findings are de-duplicated per run; this caps distinct findings stored.
+    max_findings_per_run: int = 2000
+    # Where auto-generated GAP_REPORT.md / gaps.json are written.
+    report_dir: str = "./reports"
+
     # --- Storage ----------------------------------------------------------
     sim_db_path: str = "./sim.db"
 
@@ -94,6 +109,11 @@ class Settings(BaseSettings):
     @property
     def root_base(self) -> str:
         return self.ad_server_url.rstrip("/")
+
+    @property
+    def dsp_endpoint_url(self) -> str:
+        """Absolute URL the SUT should POST OpenRTB bid requests to (fake DSP)."""
+        return self.sim_public_url.rstrip("/") + self.dsp_path
 
 
 @lru_cache

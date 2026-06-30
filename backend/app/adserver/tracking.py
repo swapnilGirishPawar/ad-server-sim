@@ -8,10 +8,18 @@ stays visible rather than being silently masked.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
+from app.adserver import macros
 from app.config import Settings
+
+
+def substitute_macros(url: str, *, errorcode: Optional[int] = None,
+                      playhead: str = "00:00:00") -> Tuple[str, List[str], List[str]]:
+    """Replace IAB VAST macros ([CACHEBUSTING]/[TIMESTAMP]/[CONTENTPLAYHEAD]/...)
+    before a player would fire the URL. Returns (url, replaced, unresolved)."""
+    return macros.substitute(url, errorcode=errorcode, playhead=playhead)
 
 
 def normalize_url(url: str, settings: Settings) -> Tuple[str, bool, Optional[str]]:
@@ -70,3 +78,7 @@ def win_url(settings: Settings, price: float, aid: str, pub: str, trace_id: str,
 
 def event_url(settings: Settings, e: str, aid: str, sid: str) -> str:
     return _q(settings.api_base, "/track/event", {"e": e, "aid": aid, "sid": sid})
+
+
+def error_url(settings: Settings, aid: str, sid: str, code: int = 0) -> str:
+    return _q(settings.api_base, "/track/error", {"aid": aid, "sid": sid, "code": code})

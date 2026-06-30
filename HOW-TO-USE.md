@@ -119,31 +119,48 @@ Scroll down. The dashboard fills in automatically:
 
 ---
 
-## 7. Run the important tests ("Business scenarios")
+## 7. Run the important tests ("Conformance scenarios")
 
-This is the most valuable part. In box **3 · Business scenarios**:
+This is the most valuable part. In box **3 · Conformance scenarios (S1–S15)**:
 
-1. Leave the dropdown on **"All (A–D)"** (or pick one).
+1. Leave the dropdown on **"All (S1–S15)"** (or pick a single one, e.g. *S7 · Budget*).
 2. Click **"Run scenario"**.
-3. **Be patient** — this can take **one to two minutes** (it runs four full tests). The
+3. **Be patient** — "All" runs 15 full tests and can take **one to two minutes**. The
    "● running…" indicator shows it's working.
 
 When it finishes, scroll down to **"Scenario Results"**. Each test shows a coloured badge:
 
 - 🟩 **PASS** — the server did the right thing.
-- 🟨 **GAP** — the server did **not** do something it should.
+- 🟨 **GAP** — the server did **not** do something it should (this is a finding for the devs).
+- 🟦 **BLOCKED** — the server doesn't have that feature at all, so there's nothing to test yet.
 - 🟥 **FAIL / ERROR** — the test couldn't complete.
 
 Each result has an **Expected** line (what *should* happen) and an **Actual** line (what the
 server *actually* did). Read those two lines and you'll understand the result.
 
-### What the four tests check
-| Test | In plain words |
-|---|---|
-| **A — Budget** | If a campaign's money runs out, it should stop showing. |
-| **B — Country targeting** | A campaign set to "India only" should not show in the US or UK. |
-| **C — Bid competition** | The campaign willing to pay more should win more often. |
-| **D — Frequency cap** | The same person shouldn't be shown the same advert too many times. |
+### What the tests check (plain words)
+| Test | In plain words | Likely result today |
+|---|---|---|
+| **S1 Smoke** | One advert request comes back as a valid video ad. | PASS |
+| **S2 Normal traffic** | Lots of requests all return valid ads. | PASS |
+| **S3 Real vs filler** | Are real campaign ads shown, or just a placeholder? | PASS after seeding |
+| **S4 No-fill** | When there's no ad, it should say so cleanly. | GAP — always shows a placeholder |
+| **S5 Country targeting** | "India only" shouldn't show in the US/UK. | GAP |
+| **S6 Frequency cap** | Same person shouldn't see it too many times. | GAP |
+| **S7 Budget** | When the money runs out, stop showing. | GAP |
+| **S8 Schedule** | An expired campaign shouldn't be picked. | PASS |
+| **S9 Ad pods / VMAP** | Ad-break playlists are well-formed; real pods exist. | PASS + BLOCKED |
+| **S10 OpenRTB** | A programmatic bid request gets a valid response. | PASS with the built-in test bidder |
+| **S11 Tracking** | View/quartile pixels record correctly and in order. | PASS |
+| **S12 Privacy** | GDPR / US-privacy / GPP signals are accepted. | PASS (with a note) |
+| **S13 ads.txt** | The transparency files are valid. | PASS |
+| **S14 Load** | Stays fast and error-free under load. | PASS/FAIL vs targets |
+| **S15 Resilience** | Doesn't crash on bad/garbage requests. | PASS |
+
+### The scorecard and the GAP report
+At the top of the results you'll see a **Conformance Scorecard** — a green/amber/red grade per
+industry standard (VAST, VMAP, OpenRTB, ads.txt, …). To hand findings to developers, click
+**"GAP report"** (a readable summary) or **"gaps.json"** (a machine-readable file) in box 3.
 
 ---
 

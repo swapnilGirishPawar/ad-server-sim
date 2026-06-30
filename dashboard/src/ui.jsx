@@ -31,7 +31,9 @@ const VERDICT = {
   PASS: 'bg-emerald-500/15 text-emerald-300 border-emerald-600/40',
   GAP: 'bg-amber-500/15 text-amber-300 border-amber-600/40',
   FAIL: 'bg-rose-500/15 text-rose-300 border-rose-600/40',
+  BLOCKED: 'bg-sky-500/15 text-sky-300 border-sky-600/40',
   ERROR: 'bg-slate-500/15 text-slate-300 border-slate-600/40',
+  WARN: 'bg-amber-500/15 text-amber-300 border-amber-600/40',
 }
 export function Badge({ verdict, children }) {
   return (

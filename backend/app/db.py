@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS ad_requests (
     status_code        INTEGER,
     latency_ms         REAL,
     filled             INTEGER,
+    classification     TEXT,
     winner_campaign    TEXT,
     winner_campaign_id TEXT,
     winner_creative_id TEXT,
@@ -104,12 +105,36 @@ CREATE TABLE IF NOT EXISTS scenario_results (
     created_at    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS findings (
+    id           TEXT PRIMARY KEY,
+    run_id       TEXT,
+    ts           TEXT,
+    ts_ms        INTEGER,
+    standard     TEXT,
+    spec_section TEXT,
+    check_id     TEXT,
+    severity     TEXT,
+    expected     TEXT,
+    observed     TEXT,
+    endpoint     TEXT,
+    scenario     TEXT,
+    request_id   TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_req_run  ON ad_requests(run_id);
 CREATE INDEX IF NOT EXISTS idx_req_ts   ON ad_requests(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_evt_run  ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_evt_ts   ON events(ts_ms);
 CREATE INDEX IF NOT EXISTS idx_evt_type ON events(type);
+CREATE INDEX IF NOT EXISTS idx_find_run ON findings(run_id);
+CREATE INDEX IF NOT EXISTS idx_find_sev ON findings(severity);
+CREATE INDEX IF NOT EXISTS idx_find_std ON findings(standard);
 """
+
+# Columns added after the initial schema shipped; applied to pre-existing DBs.
+_MIGRATIONS = {
+    "ad_requests": {"classification": "TEXT"},
+}
 
 
 class Database:
@@ -124,7 +149,17 @@ class Database:
         await self._conn.execute("PRAGMA journal_mode=WAL;")
         await self._conn.execute("PRAGMA synchronous=NORMAL;")
         await self._conn.executescript(SCHEMA)
+        await self._migrate()
         await self._conn.commit()
+
+    async def _migrate(self) -> None:
+        """Add columns introduced after the initial schema to pre-existing DBs."""
+        for table, cols in _MIGRATIONS.items():
+            async with self._conn.execute(f"PRAGMA table_info({table})") as cur:
+                existing = {row[1] for row in await cur.fetchall()}
+            for col, decl in cols.items():
+                if col not in existing:
+                    await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
     async def close(self) -> None:
         if self._conn is not None:

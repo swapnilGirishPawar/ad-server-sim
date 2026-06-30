@@ -1,0 +1,343 @@
+{
+  "scorecard": {
+    "overall": {
+      "checks": 18,
+      "pass": 13,
+      "fail": 0,
+      "warn": 3,
+      "info": 2,
+      "grade": "WARN"
+    },
+    "standards": [
+      {
+        "standard": "OpenRTB 2.6",
+        "pass": 0,
+        "fail": 0,
+        "warn": 0,
+        "info": 1,
+        "total": 1,
+        "pass_rate": null,
+        "grade": "INFO"
+      },
+      {
+        "standard": "SupplyChain",
+        "pass": 1,
+        "fail": 0,
+        "warn": 1,
+        "info": 0,
+        "total": 2,
+        "pass_rate": 0.5,
+        "grade": "WARN"
+      },
+      {
+        "standard": "VAST 4.x",
+        "pass": 8,
+        "fail": 0,
+        "warn": 1,
+        "info": 1,
+        "total": 10,
+        "pass_rate": 0.8889,
+        "grade": "WARN"
+      },
+      {
+        "standard": "VMAP",
+        "pass": 1,
+        "fail": 0,
+        "warn": 0,
+        "info": 0,
+        "total": 1,
+        "pass_rate": 1.0,
+        "grade": "PASS"
+      },
+      {
+        "standard": "ads.txt",
+        "pass": 1,
+        "fail": 0,
+        "warn": 0,
+        "info": 0,
+        "total": 1,
+        "pass_rate": 1.0,
+        "grade": "PASS"
+      },
+      {
+        "standard": "app-ads.txt",
+        "pass": 1,
+        "fail": 0,
+        "warn": 0,
+        "info": 0,
+        "total": 1,
+        "pass_rate": 1.0,
+        "grade": "PASS"
+      },
+      {
+        "standard": "sellers.json",
+        "pass": 1,
+        "fail": 0,
+        "warn": 1,
+        "info": 0,
+        "total": 2,
+        "pass_rate": 0.5,
+        "grade": "WARN"
+      }
+    ]
+  },
+  "gaps": [
+    {
+      "standard": "SupplyChain",
+      "spec_section": "SPO consistency",
+      "endpoint": "/sellers.json",
+      "expected": "ads.txt account IDs appear in sellers.json",
+      "observed": "3 ads.txt account id(s) absent from sellers.json (e.g. ['1192', '78d2425c-21bf-47e3-b05f-a30bdc621d73', 'c315bf3e-d2b2-4cd4-baea-4e02080cc379'])",
+      "severity": "warn",
+      "scenario": "",
+      "check": "ads_txt_vs_sellers"
+    },
+    {
+      "standard": "VAST 4.x",
+      "spec_section": "VAST \u00a73.7.3",
+      "endpoint": "/api/v/{tag_id}",
+      "expected": "MediaFile with bitrate",
+      "observed": "MediaFile missing bitrate (recommended)",
+      "severity": "warn",
+      "scenario": "",
+      "check": "mediafile_attrs"
+    },
+    {
+      "standard": "sellers.json",
+      "spec_section": "sellers.json \u00a73.2",
+      "endpoint": "/sellers.json",
+      "expected": "full seller_id (not truncated)",
+      "observed": "seller_id '6b3630ef-9f6' looks truncated to 12 chars",
+      "severity": "warn",
+      "scenario": "",
+      "check": "seller_id_truncation"
+    },
+    {
+      "standard": "Scenario",
+      "spec_section": "\u00a76 / S4",
+      "endpoint": "",
+      "expected": "With no eligible demand the server returns an empty <VAST/> or a <VAST><Error> (or 204/nbr on OpenRTB).",
+      "observed": "ad_type=inline, classification=real. Server returned a populated FILLER ad instead of a spec-correct no-fill \u2014 every live VAST route always fills (no empty-VAST / X-No-Fill-Reason path exists).",
+      "severity": "warn",
+      "scenario": "S4",
+      "check": "No-fill semantics"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "60b6e306a4374c2ea9ecf4f4e78305a7",
+      "run_id": "scenS15-ffae8bbca597430782863a8cc4bdfb55",
+      "scenario": "S15",
+      "verdict": "PASS",
+      "title": "Resilience / malformed inputs",
+      "expected": "Malformed/edge requests degrade gracefully (4xx/422, never 5xx).",
+      "actual": "5/5 handled gracefully. All edge cases returned <500.",
+      "created_at": "2026-06-30T10:07:49.123855+00:00",
+      "evidence": {
+        "cases": [
+          {
+            "case": "vast_missing_tag",
+            "status": 307,
+            "graceful": true
+          },
+          {
+            "case": "vast_huge_dims",
+            "status": 200,
+            "graceful": true
+          },
+          {
+            "case": "ortb_malformed_json",
+            "status": 400,
+            "graceful": true
+          },
+          {
+            "case": "ortb_empty_body",
+            "status": 400,
+            "graceful": true
+          },
+          {
+            "case": "track_bad_consent",
+            "status": 200,
+            "graceful": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "4eec922d947948f4b6407483c5896801",
+      "run_id": "scenS13-3ca643fd8a1542d0aaf4fb8e2bb108ab",
+      "scenario": "S13",
+      "verdict": "PASS",
+      "title": "ads.txt / sellers.json / SupplyChain",
+      "expected": "ads.txt/app-ads.txt/sellers.json parse with valid IAB lines + consistent IDs; bid requests carry schain.",
+      "actual": "ads.txt={'records': 3, 'seller_ids': ['1192', '78d2425c-21bf-47e3-b05f-a30bdc621d73', 'c315bf3e-d2b2-4cd4-baea-4e02080cc379']}, sellers.json={'sellers': 10}, app-ads.txt={'records': 3}. Conformance fails=0. ",
+      "created_at": "2026-06-30T10:07:48.933379+00:00",
+      "evidence": {
+        "supply": {
+          "findings": [
+            {
+              "standard": "ads.txt",
+              "spec_section": "IAB ads.txt \u00a73",
+              "check": "record_format",
+              "severity": "pass",
+              "expected": "conforms",
+              "observed": "3 valid record(s)",
+              "endpoint": "/ads.txt",
+              "scenario": "",
+              "request_id": null
+            },
+            {
+              "standard": "app-ads.txt",
+              "spec_section": "IAB ads.txt \u00a73",
+              "check": "record_format",
+              "severity": "pass",
+              "expected": "conforms",
+              "observed": "3 valid record(s)",
+              "endpoint": "/app-ads.txt",
+              "scenario": "",
+              "request_id": null
+            },
+            {
+              "standard": "sellers.json",
+              "spec_section": "sellers.json \u00a73.2",
+              "check": "seller_id_truncation",
+              "severity": "warn",
+              "expected": "full seller_id (not truncated)",
+              "observed": "seller_id '6b3630ef-9f6' looks truncated to 12 chars",
+              "endpoint": "/sellers.json",
+              "scenario": "",
+              "request_id": null
+            },
+            {
+              "standard": "sellers.json",
+              "spec_section": "sellers.json \u00a73.2",
+              "check": "sellers",
+              "severity": "pass",
+              "expected": "conforms",
+              "observed": "10 seller(s)",
+              "endpoint": "/sellers.json",
+              "scenario": "",
+              "request_id": null
+            },
+            {
+              "standard": "SupplyChain",
+              "spec_section": "SPO consistency",
+              "check": "ads_txt_vs_sellers",
+              "severity": "warn",
+              "expected": "ads.txt account IDs appear in sellers.json",
+              "observed": "3 ads.txt account id(s) absent from sellers.json (e.g. ['1192', '78d2425c-21bf-47e3-b05f-a30bdc621d73', 'c315bf3e-d2b2-4cd4-baea-4e02080cc379'])",
+              "endpoint": "/sellers.json",
+              "scenario": "",
+              "request_id": null
+            }
+          ],
+          "ads_txt": {
+            "records": 3,
+            "seller_ids": [
+              "1192",
+              "78d2425c-21bf-47e3-b05f-a30bdc621d73",
+              "c315bf3e-d2b2-4cd4-baea-4e02080cc379"
+            ]
+          },
+          "app_ads_txt": {
+            "records": 3
+          },
+          "sellers_json": {
+            "sellers": 10
+          }
+        },
+        "finding_counts": {
+          "pass": 4,
+          "warn": 2
+        }
+      }
+    },
+    {
+      "id": "9935012d18864e98bbe44377f666403a",
+      "run_id": "scenS9-dd2cdbad7cf64f8bb783231ecdfe026d",
+      "scenario": "S9",
+      "verdict": "PASS",
+      "title": "Ad pods / VMAP",
+      "expected": "VMAP is well-formed (AdBreak/timeOffset/AdSource); a pod request yields a multi-ad pod.",
+      "actual": "VMAP: 3 AdBreak(s), 0 structural fail(s). True multi-<Ad> ad pods: BLOCKED \u2014 the SUT emits no <Ad sequence> pod on any endpoint (/api/m is a static 3-break template; the pod-aware /serve router is unmounted).",
+      "created_at": "2026-06-30T10:07:48.815882+00:00",
+      "evidence": {
+        "vmap_well_formed": true,
+        "ad_breaks": [
+          {
+            "index": 0,
+            "timeOffset": "start",
+            "breakType": "linear",
+            "has_ad_source": true
+          },
+          {
+            "index": 1,
+            "timeOffset": "00:05:00",
+            "breakType": "linear",
+            "has_ad_source": true
+          },
+          {
+            "index": 2,
+            "timeOffset": "end",
+            "breakType": "linear",
+            "has_ad_source": true
+          }
+        ],
+        "vmap_fail": [],
+        "pod_supported": false,
+        "pod_request_status": 204
+      }
+    },
+    {
+      "id": "271e9a954e6541e99ea29855386b5efd",
+      "run_id": "scenS4-db18cb795e394987aabe66ab22088fa7",
+      "scenario": "S4",
+      "verdict": "GAP",
+      "title": "No-fill semantics",
+      "expected": "With no eligible demand the server returns an empty <VAST/> or a <VAST><Error> (or 204/nbr on OpenRTB).",
+      "actual": "ad_type=inline, classification=real. Server returned a populated FILLER ad instead of a spec-correct no-fill \u2014 every live VAST route always fills (no empty-VAST / X-No-Fill-Reason path exists).",
+      "created_at": "2026-06-30T10:07:46.570722+00:00",
+      "evidence": {
+        "ad_type": "inline",
+        "classification": "real",
+        "has_error_node": false,
+        "raw_snippet": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<VAST version=\"4.2\">\n  <Ad id=\"a45f2277-2136-4b1e-b37c-189c09e9d5ca\">\n    <InLine>\n      <AdSystem>Voise Tech Adserver</AdSystem>\n      <AdTitle>Campaign 2 (video, CPM 17.19)</AdTitle>\n      <Impression><![CDATA[https://voiseadserver.com/track/impression?aid=26"
+      }
+    },
+    {
+      "id": "1f000cd629584e66b70502505f358c05",
+      "run_id": "scenS3-c50e4c2e550c47e9a57e07f60600784a",
+      "scenario": "S3",
+      "verdict": "PASS",
+      "title": "Real-vs-filler fill rate",
+      "expected": "A seeded campaign serves REAL ads (real-fill rate > 0 after the field-name workaround).",
+      "actual": "real=200 (100%), filler=0. Real campaign serving works after the ad_format/target_cpm workaround.",
+      "created_at": "2026-06-30T10:07:46.422769+00:00",
+      "evidence": {
+        "requests": 200,
+        "real": 200,
+        "filler": 0,
+        "real_fill_rate": 1.0
+      }
+    },
+    {
+      "id": "28b21bd5d7a745468fbdc7cc441e3a79",
+      "run_id": "scenS1-c7a70e95748a4087bb51ea4ecccf5062",
+      "scenario": "S1",
+      "verdict": "PASS",
+      "title": "Smoke \u2014 single VAST request is spec-valid",
+      "expected": "GET /api/v/{tag} returns schema-valid VAST 4.x with required nodes.",
+      "actual": "ad_type=inline, version=4.2, 0 structural failure(s): []",
+      "created_at": "2026-06-30T10:07:39.427365+00:00",
+      "evidence": {
+        "ad_type": "inline",
+        "version": "4.2",
+        "classification": "real",
+        "fail_findings": [],
+        "media_files": [
+          "https://cdn.example.com/sim/99c88268abd24774b4cd04c348cbaa30.mp4"
+        ]
+      }
+    }
+  ]
+}

@@ -4,8 +4,11 @@ Responsibilities:
   * auth bootstrap (login, with open-registration fallback for local dev)
   * entity creation for seeding (publishers, ad units, advertisers, DSPs,
     line items, campaigns, creatives)
-  * ad requests over VAST and OpenRTB, returning a normalised AdResult
-  * firing tracking pixels (impression / click / event / win)
+  * ad requests over VAST and OpenRTB, validated against IAB specs into a
+    normalised AdResult (with conformance findings + classification)
+  * recursive VAST Wrapper following (VASTAdTagURI, depth cap, loop detection)
+  * firing tracking pixels with macro substitution + host/prefix rewrite
+  * supply-chain transparency fetch (ads.txt / app-ads.txt / sellers.json)
   * reading back the server's own reports for cross-verification
 
 Seeding raises on failure (a broken seed must be loud). Ad requests and pixel
@@ -21,12 +24,25 @@ import httpx
 
 from app.adserver import ortb as ortb_mod
 from app.adserver import tracking
+from app.adserver import validators
 from app.adserver.result import AdResult
-from app.adserver.vast import parse_vast
 from app.config import Settings
 from app.util import new_id
 
 logger = logging.getLogger("adsim.client")
+
+# Corrected-§3 live routes (used until target discovery overrides them).
+DEFAULT_ROUTES: Dict[str, str] = {
+    "vast_canonical": "/api/v/{tag_id}",
+    "ortb_auction": "/api/b/{tag_id}",
+    "vmap": "/api/m/{tag_id}",
+    "dooh_vast": "/api/dooh/vast",
+    "ads_txt": "/ads.txt",
+    "app_ads_txt": "/app-ads.txt",
+    "sellers_json": "/sellers.json",
+}
+
+WRAPPER_MAX_DEPTH = 5
 
 
 class AdServerError(RuntimeError):
@@ -38,6 +54,8 @@ class AdServerClient:
         self.s = settings
         self.token: Optional[str] = None
         self.user: Dict[str, Any] = {}
+        self.routes: Dict[str, str] = dict(DEFAULT_ROUTES)
+        self.discovery: Dict[str, Any] = {}
         self._client = httpx.AsyncClient(
             timeout=settings.http_timeout,
             verify=settings.verify_tls,
@@ -45,6 +63,8 @@ class AdServerClient:
         )
         # rewrites observed while normalising embedded tracking URLs (findings)
         self.url_rewrite_notes: Dict[str, int] = {}
+        # macros we substituted while firing (so we can prove we behaved like a player)
+        self.macro_counts: Dict[str, int] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -55,16 +75,31 @@ class AdServerClient:
     async def __aexit__(self, *exc: Any) -> None:
         await self.aclose()
 
+    def apply_discovery(self, disc: Dict[str, Any]) -> None:
+        """Repoint serving/supply routes to the SUT's actually-mounted paths."""
+        self.discovery = disc
+        for cap, path in (disc.get("resolved") or {}).items():
+            if path:
+                self.routes[cap] = path
+
+    def _url(self, cap: str, **fmt: Any) -> str:
+        path = self.routes.get(cap, DEFAULT_ROUTES.get(cap, ""))
+        return self.s.root_base + path.format(**fmt)
+
     # ------------------------------------------------------------------ auth
     def _auth_headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
     async def ping(self) -> bool:
-        try:
-            r = await self._client.get(f"{self.s.api_base}/ping")
-            return r.status_code == 200
-        except httpx.HTTPError:
-            return False
+        for path in ("/ping", "/health", "/openapi.json"):
+            try:
+                r = await self._client.get(f"{self.s.api_base}{path}" if path == "/ping"
+                                           else f"{self.s.root_base}{path}")
+                if r.status_code == 200:
+                    return True
+            except httpx.HTTPError:
+                continue
+        return False
 
     async def ensure_auth(self) -> None:
         """Login; if that fails and auto_register is on, register then login."""
@@ -90,7 +125,6 @@ class AdServerClient:
         if rr.status_code == 200:
             self._store_token(rr.json())
             return
-        # Someone may have registered between our login and register attempts.
         r2 = await self._client.post(f"{self.s.api_base}/auth/login", json=creds)
         if r2.status_code == 200:
             self._store_token(r2.json())
@@ -108,12 +142,6 @@ class AdServerClient:
     # --------------------------------------------------------------- generic
     async def _send(self, method: str, path: str, *, json: Any = None,
                     params: Any = None, auth: bool = True) -> httpx.Response:
-        """Issue a request, retrying once on transport errors.
-
-        The ad server resets the keep-alive connection after a 500 (e.g. the
-        publisher-insert bug), which surfaces as a ReadError on the NEXT request
-        that reuses the socket. A single retry picks up a fresh connection.
-        """
         headers = self._auth_headers() if auth else {}
         url = f"{self.s.api_base}{path}"
         last: Optional[Exception] = None
@@ -142,6 +170,10 @@ class AdServerClient:
             return r.json() if r.content else None
         raise AdServerError(f"GET {path} -> {r.status_code}: {r.text[:200]}")
 
+    async def get_root(self, path: str) -> httpx.Response:
+        """GET an absolute (root-relative) path, e.g. /ads.txt or /openapi.json."""
+        return await self._client.get(f"{self.s.root_base}{path}")
+
     # --------------------------------------------------------------- seeding
     async def create_publisher(self, name: str, domain: str = "") -> Dict[str, Any]:
         return await self._post("/publishers", {
@@ -163,10 +195,11 @@ class AdServerClient:
             "domain": f"{name.lower().replace(' ', '')}.com",
         })
 
-    async def create_demand_partner(self, name: str, ad_format: str, bid_floor: float) -> Dict[str, Any]:
+    async def create_demand_partner(self, name: str, ad_format: str, bid_floor: float,
+                                    endpoint_url: str = "") -> Dict[str, Any]:
         return await self._post("/demand-partners", {
             "name": name, "type": "dsp", "status": "active",
-            "endpoint_url": "", "supported_formats": [ad_format],
+            "endpoint_url": endpoint_url, "supported_formats": [ad_format],
             "bid_floor": bid_floor, "timeout_ms": 1000,
         })
 
@@ -183,16 +216,12 @@ class AdServerClient:
                               daily_budget: float, cpm: float, ad_format: str,
                               start_date: str, end_date: str,
                               countries: List[str], devices: List[str]) -> Dict[str, Any]:
-        """Create a serveable campaign via REST (create + decisioning shim).
+        """Create a serveable campaign via REST (create + decisioning-field shim).
 
         SERVER BUG worked around here: the create API persists `format_targets`,
-        `cpm_bid`, `cached_spend_*`, but the internal auction (`decide_vast_ad`)
-        queries `ad_format`, ranks by `target_cpm`, and gates on `spent`/
-        `daily_spent`. A freshly created campaign therefore matches NO decisioning
-        query (verified: `decisioning match count: 0`). `update_campaign` does a
-        raw `$set`, so we PUT the decisioning field names — over REST — to make
-        the campaign eligible. We set spent=0 (correct initial state), never a
-        value that pre-decides a scenario.
+        `cpm_bid`, `cached_spend_*`, but the auction (`decide_vast_ad`) reads
+        `ad_format`, ranks by `target_cpm`, and gates on `spent`. We PUT the
+        decisioning field names so the campaign is eligible — and report it.
         """
         created = await self._post("/campaigns", {
             "name": name, "advertiser_id": advertiser_id, "status": "active",
@@ -228,63 +257,156 @@ class AdServerClient:
         })
 
     # --------------------------------------------------------------- serving
+    def _classify_vast(self, vr: validators.VastResult, tag_id: str) -> str:
+        if vr.ad_type in ("empty",):
+            return "no_fill"
+        if vr.ad_type in ("unparseable",):
+            return "error"
+        if not vr.filled:
+            return "no_fill"
+        # Filler heuristic for the SUT's default "Video Ad".
+        title = (vr.ad_title or "").strip()
+        media = (vr.media_files[0].get("url") if vr.media_files else "") or ""
+        is_filler = (
+            title in ("", "Video Ad")
+            and (f"/creative/{tag_id}.mp4" in media or "voise.com" in (vr.clickthrough_url or ""))
+        )
+        return "filler" if is_filler else "real"
+
     async def request_vast(self, *, tag_id: str, publisher_id: str, device: str,
-                           user_id: str, width: int = 640, height: int = 480) -> AdResult:
-        params = {"pub": publisher_id, "w": width, "h": height, "ifa": user_id}
+                           user_id: str, width: int = 640, height: int = 480,
+                           country: Optional[str] = None,
+                           privacy: Optional[Dict[str, Any]] = None,
+                           cap: str = "vast_canonical",
+                           follow_wrappers: bool = True) -> AdResult:
+        params: Dict[str, Any] = {"pub": publisher_id, "w": width, "h": height, "ifa": user_id}
         if device in ("ctv", "tv"):
             params["devicetype"] = 3
+        if country:
+            params["country"] = country
+        if privacy:  # send privacy signals on the serving path (S12) even if SUT drops them
+            for k in ("gdpr", "gdpr_consent", "us_privacy", "gpp", "gpp_sid"):
+                if privacy.get(k) is not None:
+                    params[k] = privacy[k]
         t0 = time.perf_counter()
         try:
-            r = await self._client.get(f"{self.s.api_base}/v/{tag_id}", params=params)
+            r = await self._client.get(self._url(cap, tag_id=tag_id), params=params)
         except httpx.HTTPError as e:
             return AdResult(protocol="vast", status_code=0,
                             latency_ms=(time.perf_counter() - t0) * 1000,
-                            filled=False, no_fill_reason=f"transport_error:{type(e).__name__}")
+                            filled=False, classification="error",
+                            no_fill_reason=f"transport_error:{type(e).__name__}")
         latency = (time.perf_counter() - t0) * 1000
-        parsed = parse_vast(r.text)
-        # `decide_vast_ad` ALWAYS returns a VAST; when no real campaign is selected
-        # it emits a default "Video Ad" filler (AdTitle="Video Ad", Ad id=tag_id).
-        # Treat that as a no-fill in campaign terms so fill-rate/win-distribution
-        # reflect REAL campaign serving, not the filler.
-        is_filler = parsed["filled"] and (
-            parsed["campaign"] in (None, "Video Ad")
-            and (not parsed["creative_id"] or parsed["creative_id"] == str(tag_id))
-        )
-        real_fill = parsed["filled"] and not is_filler
-        no_fill = parsed["no_fill_reason"] or r.headers.get("X-No-Fill-Reason")
-        if is_filler:
-            no_fill = "default_filler_no_campaign"
+        endpoint = self.routes.get(cap, "")
+        vr = validators.validate_vast(r.text, endpoint=endpoint)
+
+        if r.status_code == 0 or r.status_code >= 500:
+            classification = "error"
+        else:
+            classification = self._classify_vast(vr, tag_id)
+
+        # Recursive Wrapper following (VASTAdTagURI), accumulating tracking.
+        depth = 0
+        if follow_wrappers and vr.ad_type == "wrapper" and vr.wrapper_uri:
+            inner, depth = await self._follow_wrappers(vr, endpoint)
+            if inner is not None:
+                # merge child impressions/tracking into the parent view
+                vr.impression_urls += inner.impression_urls
+                for ev, urls in inner.tracking_events.items():
+                    vr.tracking_events.setdefault(ev, []).extend(urls)
+                vr.click_tracking_urls += inner.click_tracking_urls
+                vr.media_files += inner.media_files
+                if inner.clickthrough_url and not vr.clickthrough_url:
+                    vr.clickthrough_url = inner.clickthrough_url
+                vr.findings += inner.findings
+                if inner.ad_type == "inline":
+                    classification = self._classify_vast(inner, tag_id)
+
+        real_fill = classification == "real"
+        flat_events = [u for urls in vr.tracking_events.values() for u in urls]
+        click_urls = ([vr.clickthrough_url] if vr.clickthrough_url else []) + vr.click_tracking_urls
         return AdResult(
             protocol="vast", status_code=r.status_code, latency_ms=latency,
-            filled=real_fill, campaign=None if is_filler else parsed["campaign"],
-            creative_id=parsed["creative_id"], impression_urls=parsed["impression_urls"],
-            click_urls=([parsed["clickthrough_url"]] if parsed["clickthrough_url"] else [])
-                       + parsed["click_tracking_urls"],
-            event_urls=parsed["tracking_event_urls"],
-            no_fill_reason=None if real_fill else no_fill,
-            trace_id=r.headers.get("X-Request-Id"),
+            filled=real_fill, classification=classification,
+            campaign=None if classification == "filler" else vr.ad_title,
+            creative_id=vr.ad_id,
+            impression_urls=vr.impression_urls, click_urls=click_urls,
+            event_urls=flat_events, tracking_events=vr.tracking_events,
+            error_urls=vr.error_urls, media_urls=[m["url"] for m in vr.media_files if m.get("url")],
+            ad_type=vr.ad_type, vast_version=vr.version, has_omid=vr.has_omid, wrapper_depth=depth,
+            findings=[f.to_dict() for f in vr.findings],
+            no_fill_reason=None if real_fill else (classification if classification != "real" else None),
+            trace_id=r.headers.get("X-Request-Id") or r.headers.get("x-request-id"),
             raw=r.text[:2000],
         )
+
+    async def _follow_wrappers(self, vr: validators.VastResult, endpoint: str):
+        """Resolve VASTAdTagURI chain until InLine / depth cap / loop. Returns (inner, depth)."""
+        visited = set()
+        uri = vr.wrapper_uri
+        depth = 0
+        last: Optional[validators.VastResult] = None
+        while uri and depth < WRAPPER_MAX_DEPTH:
+            sub, _, note = tracking.normalize_url(uri, self.s)
+            if note:
+                self.url_rewrite_notes[note] = self.url_rewrite_notes.get(note, 0) + 1
+            if sub in visited:
+                vr.findings.append(validators.Finding(
+                    standard=validators.VAST, spec_section="VAST §3.3.1", check="wrapper_loop",
+                    severity=validators.FAIL, expected="no redirect loop in wrapper chain",
+                    observed=f"loop detected at {sub}", endpoint=endpoint))
+                break
+            visited.add(sub)
+            depth += 1
+            try:
+                r = await self._client.get(sub)
+            except httpx.HTTPError as e:
+                vr.findings.append(validators.Finding(
+                    standard=validators.VAST, spec_section="VAST §3.3.1", check="wrapper_fetch",
+                    severity=validators.FAIL, expected="VASTAdTagURI resolves",
+                    observed=f"fetch error: {type(e).__name__}", endpoint=sub))
+                break
+            inner = validators.validate_vast(r.text, endpoint=sub)
+            last = inner
+            if inner.ad_type == "wrapper" and inner.wrapper_uri:
+                uri = inner.wrapper_uri
+                continue
+            break
+        if depth >= WRAPPER_MAX_DEPTH and last is not None and last.ad_type == "wrapper":
+            vr.findings.append(validators.Finding(
+                standard=validators.VAST, spec_section="VAST §3.3.1", check="wrapper_depth",
+                severity=validators.WARN, expected=f"wrapper chain resolves within {WRAPPER_MAX_DEPTH} hops",
+                observed=f"still a wrapper at depth {depth}", endpoint=endpoint))
+        return last, depth
 
     async def request_ortb(self, *, tag_id: str, publisher_id: str, country: str,
                            device: str, browser: str, user_id: str,
                            width: int = 640, height: int = 480,
-                           ad_format: str = "video") -> AdResult:
+                           ad_format: str = "video", bidfloor: float = 0.1,
+                           privacy: Optional[Dict[str, Any]] = None,
+                           pod: Optional[Dict[str, Any]] = None,
+                           app_mode: bool = False, ifa: Optional[str] = None) -> AdResult:
         req_id = new_id("bid-")
+        privacy = privacy or {}
         body = ortb_mod.build_bid_request(
             request_id=req_id, tag_id=tag_id, publisher_id=publisher_id,
             country=country, device=device, browser=browser, user_id=user_id,
-            width=width, height=height, ad_format=ad_format,
+            width=width, height=height, ad_format=ad_format, bidfloor=bidfloor,
+            app_mode=app_mode, ifa=ifa,
+            gdpr=privacy.get("gdpr"), consent=privacy.get("consent") or privacy.get("gdpr_consent"),
+            us_privacy=privacy.get("us_privacy"), gpp=privacy.get("gpp"),
+            gpp_sid=privacy.get("gpp_sid"), coppa=privacy.get("coppa"), pod=pod,
         )
+        endpoint = self.routes.get("ortb_auction", "")
         t0 = time.perf_counter()
         try:
-            r = await self._client.post(f"{self.s.api_base}/b/{tag_id}",
+            r = await self._client.post(self._url("ortb_auction", tag_id=tag_id),
                                         params={"pub": publisher_id}, json=body)
         except httpx.HTTPError as e:
             return AdResult(protocol="ortb", status_code=0,
                             latency_ms=(time.perf_counter() - t0) * 1000,
-                            filled=False, no_fill_reason=f"transport_error:{type(e).__name__}",
-                            trace_id=req_id)
+                            filled=False, classification="error",
+                            no_fill_reason=f"transport_error:{type(e).__name__}", trace_id=req_id)
         latency = (time.perf_counter() - t0) * 1000
         payload: Any = None
         if r.content:
@@ -293,30 +415,100 @@ class AdServerClient:
             except ValueError:
                 payload = None
         parsed = ortb_mod.parse_bid_response(r.status_code, payload)
+        vresult = validators.validate_bid_response(r.status_code, payload, request=body, endpoint=endpoint)
         win_urls = [u for u in (parsed.get("nurl"), parsed.get("burl")) if u]
+        if r.status_code == 0 or r.status_code >= 500:
+            classification = "error"
+        elif parsed["filled"]:
+            classification = "real"
+        else:
+            classification = "no_fill"
         return AdResult(
             protocol="ortb", status_code=r.status_code, latency_ms=latency,
-            filled=parsed["filled"], campaign_id=parsed["campaign_id"],
-            creative_id=parsed["creative_id"], price=parsed["price"],
-            win_urls=win_urls, no_fill_reason=parsed["no_fill_reason"],
-            trace_id=req_id, raw=(r.text[:2000] if r.content else ""),
+            filled=parsed["filled"], classification=classification,
+            campaign_id=parsed["campaign_id"], creative_id=parsed["creative_id"],
+            price=parsed["price"], win_urls=win_urls,
+            findings=[f.to_dict() for f in vresult.findings],
+            no_fill_reason=parsed["no_fill_reason"], trace_id=req_id,
+            raw=(r.text[:2000] if r.content else ""),
         )
 
     # -------------------------------------------------------------- tracking
-    async def fire(self, url: str, normalize: bool = True) -> Dict[str, Any]:
-        """GET a tracking URL. Never raises. Returns status/ok/final url/note."""
+    async def fire(self, url: str, normalize: bool = True, *, errorcode: Optional[int] = None,
+                   playhead: str = "00:00:00") -> Dict[str, Any]:
+        """GET a tracking URL like a real player would: substitute macros, rewrite
+        host/prefix, fire. Never raises. Returns status/ok/final url/note."""
         final, rewritten, note = (url, False, None)
         if normalize:
             final, rewritten, note = tracking.normalize_url(url, self.s)
             if rewritten and note:
                 self.url_rewrite_notes[note] = self.url_rewrite_notes.get(note, 0) + 1
+        final, replaced, _unresolved = tracking.substitute_macros(final, errorcode=errorcode, playhead=playhead)
+        for m in replaced:
+            self.macro_counts[m] = self.macro_counts.get(m, 0) + 1
         try:
             r = await self._client.get(final)
-            # 2xx and 3xx (click endpoints answer 302) both count as recorded.
             ok = 200 <= r.status_code < 400
-            return {"ok": ok, "status_code": r.status_code, "url": final, "note": note}
+            return {"ok": ok, "status_code": r.status_code, "url": final, "note": note,
+                    "macros": replaced}
         except httpx.HTTPError as e:
-            return {"ok": False, "status_code": 0, "url": final, "note": f"transport_error:{type(e).__name__}"}
+            return {"ok": False, "status_code": 0, "url": final,
+                    "note": f"transport_error:{type(e).__name__}", "macros": replaced}
+
+    async def fire_quartiles(self, result: AdResult) -> List[Dict[str, Any]]:
+        """Fire start -> firstQuartile -> midpoint -> thirdQuartile -> complete IN ORDER,
+        using whatever quartile <Tracking> URLs the VAST carried. Returns per-event fires."""
+        from app.adserver.macros import QUARTILE_PLAYHEAD
+        out: List[Dict[str, Any]] = []
+        for ev in ("start", "firstQuartile", "midpoint", "thirdQuartile", "complete"):
+            for url in result.tracking_events.get(ev, []):
+                fired = await self.fire(url, playhead=QUARTILE_PLAYHEAD.get(ev, "00:00:00"))
+                out.append({"event": ev, **fired})
+        return out
+
+    # ------------------------------------------------------- supply chain
+    async def fetch_supply_files(self) -> Dict[str, Any]:
+        """Fetch + validate ads.txt / app-ads.txt / sellers.json (best-effort)."""
+        from app.adserver import supplychain
+        out: Dict[str, Any] = {"findings": []}
+        ads = await self._safe_text(self.routes.get("ads_txt", "/ads.txt"))
+        appads = await self._safe_text(self.routes.get("app_ads_txt", "/app-ads.txt"))
+        sellers = await self._safe_json(self.routes.get("sellers_json", "/sellers.json"))
+
+        ads_ids: List[str] = []
+        if ads is not None:
+            v = supplychain.validate_ads_txt(ads, endpoint=self.routes.get("ads_txt", "/ads.txt"))
+            out["ads_txt"] = {"records": len(v["records"]), "seller_ids": v["seller_ids"]}
+            out["findings"] += v["findings"]
+            ads_ids = v["seller_ids"]
+        else:
+            out["ads_txt"] = {"error": "unreachable"}
+        if appads is not None:
+            v = supplychain.validate_ads_txt(appads, endpoint=self.routes.get("app_ads_txt", "/app-ads.txt"), app=True)
+            out["app_ads_txt"] = {"records": len(v["records"])}
+            out["findings"] += v["findings"]
+        if sellers is not None:
+            v = supplychain.validate_sellers_json(sellers, endpoint=self.routes.get("sellers_json", "/sellers.json"),
+                                                  ads_txt_seller_ids=ads_ids)
+            out["sellers_json"] = {"sellers": len(v["seller_ids"])}
+            out["findings"] += v["findings"]
+        else:
+            out["sellers_json"] = {"error": "unreachable"}
+        return out
+
+    async def _safe_text(self, path: str) -> Optional[str]:
+        try:
+            r = await self.get_root(path)
+            return r.text if r.status_code == 200 else None
+        except httpx.HTTPError:
+            return None
+
+    async def _safe_json(self, path: str) -> Optional[Any]:
+        try:
+            r = await self.get_root(path)
+            return r.json() if r.status_code == 200 and r.content else None
+        except (httpx.HTTPError, ValueError):
+            return None
 
     # ------------------------------------------------------------- reporting
     async def get_campaign(self, campaign_id: str) -> Optional[Dict[str, Any]]:
@@ -338,8 +530,6 @@ class AdServerClient:
             return None
 
     async def delete_campaign(self, campaign_id: str) -> None:
-        """Soft-delete (status->completed). Best-effort; used by scenarios to clean
-        up the campaigns they create so they don't accumulate / ratchet CPMs."""
         try:
             await self._send("DELETE", f"/campaigns/{campaign_id}")
         except AdServerError:

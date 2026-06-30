@@ -71,6 +71,10 @@ class Seeder:
         ad_units: List[Dict[str, Any]] = []
         campaigns: List[Dict[str, Any]] = []
 
+        # Deterministic + idempotent: seed the RNG so re-runs produce the same world.
+        if req.rng_seed is not None:
+            random.seed(req.rng_seed)
+
         fmt = req.ad_format
 
         # --- Publishers + ad units -------------------------------------
@@ -110,6 +114,18 @@ class Seeder:
                 errors.append(f"advertiser '{aname}': {e}")
         if not advertiser_ids:
             advertiser_ids = [""]  # auction does not require an advertiser
+
+        # --- Fake DSP (so the OpenRTB auction has something to win — S10) ---
+        fake_dsp_seeded = False
+        if req.seed_fake_dsp:
+            try:
+                dp = await self.c.create_demand_partner(
+                    "Voise Fake DSP", fmt, bid_floor=0.5, endpoint_url=self.s.dsp_endpoint_url)
+                await self._record("demand_partner", dp)
+                counts["demand_partners"] += 1
+                fake_dsp_seeded = True
+            except AdServerError as e:
+                errors.append(f"fake_dsp: {e}")
 
         # --- DSPs + line items -----------------------------------------
         dsp_names = req.dsp_names or _letter_names("DSP", req.demand_partners)
@@ -201,10 +217,16 @@ class Seeder:
         if not counts["campaigns"]:
             findings.append("No campaigns created — nothing will serve a real ad (auction returns a "
                             "default 'Video Ad' filler for every request).")
+        if fake_dsp_seeded:
+            findings.append(
+                f"Registered the built-in fake DSP as a demand partner (endpoint {self.s.dsp_endpoint_url}). "
+                "The SUT's OpenRTB auction can now win a real bid — required for S10. Ensure the SUT can "
+                "reach that URL (host networking / host.docker.internal).")
 
         summary = {
             "run_id": run_id, "counts": counts, "errors": errors, "findings": findings,
             "ad_units": ad_units, "campaigns": campaigns, "synthetic_ad_units": synthetic,
+            "fake_dsp_seeded": fake_dsp_seeded,
             "url_rewrite_notes": self.c.url_rewrite_notes,
             "note": "Names like 'Top Banner' are cosmetic; the internal VAST auction "
                     "only serves video/ctv/dooh formats, so ad units/campaigns use ad_format="

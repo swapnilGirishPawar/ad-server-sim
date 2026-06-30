@@ -5,11 +5,14 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import PlainTextResponse
 
+from app import discovery as discovery_mod
+from app import report as report_mod
 from app.adserver.client import AdServerClient, AdServerError
 from app.config import Settings
 from app.db import Database
-from app.models import RunRequest, ScenarioRequest, SeedRequest
+from app.models import DspConfig, RunRequest, ScenarioRequest, SeedRequest
 from app.modules import metrics
 from app.modules.seeder import Seeder
 
@@ -40,6 +43,15 @@ async def config(request: Request):
     data.pop("ad_server_password", None)
     data["protocols"] = s.protocols
     return data
+
+
+@router.get("/target")
+async def target(request: Request):
+    """Target discovery: which SUT routes are live (read from its OpenAPI)."""
+    s, _, client, _ = _state(request)
+    disc = await discovery_mod.discover(s)
+    client.apply_discovery(disc)
+    return {"resolved_routes": client.routes, "discovery": disc}
 
 
 # --------------------------------------------------------------- actions
@@ -123,6 +135,79 @@ async def m_timeseries(request: Request, run_id: Optional[str] = None, bucket_ms
 async def m_scenarios(request: Request, run_id: Optional[str] = None):
     _, db, _, _ = _state(request)
     return await metrics.scenario_results(db, run_id)
+
+
+@router.get("/metrics/fill")
+async def m_fill(request: Request, run_id: Optional[str] = None):
+    _, db, _, _ = _state(request)
+    return await metrics.fill_breakdown(db, run_id)
+
+
+@router.get("/metrics/findings")
+async def m_findings(request: Request, run_id: Optional[str] = None):
+    _, db, _, _ = _state(request)
+    return await metrics.findings_summary(db, run_id)
+
+
+@router.get("/metrics/scorecard")
+async def m_scorecard(request: Request, run_id: Optional[str] = None):
+    _, db, _, _ = _state(request)
+    return (await metrics.findings_summary(db, run_id))["scorecard"]
+
+
+@router.get("/metrics/reconcile")
+async def m_reconcile(request: Request, run_id: Optional[str] = None, tolerance: float = 0.05):
+    _, db, client, _ = _state(request)
+    try:
+        await client.ensure_auth()
+    except AdServerError as e:
+        raise HTTPException(status_code=502, detail=f"Ad server auth failed: {e}")
+    return await metrics.reconcile(db, client, run_id, tolerance)
+
+
+@router.get("/supply-chain")
+async def supply_chain(request: Request):
+    """Fetch + validate ads.txt / app-ads.txt / sellers.json from the SUT."""
+    _, _, client, _ = _state(request)
+    return await client.fetch_supply_files()
+
+
+# --------------------------------------------------------------- report
+@router.get("/report")
+async def report(request: Request, run_id: Optional[str] = None):
+    s, db, client, _ = _state(request)
+    return await report_mod.write_report(db, s, run_id=run_id, discovery=client.discovery)
+
+
+@router.get("/report/markdown", response_class=PlainTextResponse)
+async def report_md(request: Request, run_id: Optional[str] = None):
+    s, db, client, _ = _state(request)
+    out = await report_mod.write_report(db, s, run_id=run_id, discovery=client.discovery)
+    return out["markdown"]
+
+
+@router.get("/report/gaps.json")
+async def report_gaps(request: Request, run_id: Optional[str] = None):
+    s, db, client, _ = _state(request)
+    out = await report_mod.write_report(db, s, run_id=run_id, discovery=client.discovery)
+    return {"scorecard": out["scorecard"], "gaps": out["gaps"], "scenarios": out["scenarios"]}
+
+
+# --------------------------------------------------------------- fake DSP
+@router.get("/dsp")
+async def dsp_status(request: Request):
+    from app.dsp import router as dsp
+    s, *_ = _state(request)
+    return {"endpoint_url": s.dsp_endpoint_url, "config": dsp.CONFIG, "stats": dsp.STATS}
+
+
+@router.post("/dsp/config")
+async def dsp_config(request: Request, cfg: DspConfig):
+    from app.dsp import router as dsp
+    for k, v in cfg.patch().items():
+        if k in dsp.CONFIG:
+            dsp.CONFIG[k] = v
+    return dsp.CONFIG
 
 
 @router.get("/metrics/cross-check")

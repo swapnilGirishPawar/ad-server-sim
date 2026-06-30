@@ -23,10 +23,24 @@ from app.adserver.result import AdResult
 from app.adserver import tracking
 from app.config import Settings
 from app.db import Database
+from app.findings_recorder import FindingRecorder
 from app.models import RunRequest
 from app.modules import clicks, impressions
 from app.modules.users import SimUser, UserPool
 from app.util import new_id, now_iso, now_ms
+
+
+def percentile(sorted_vals: List[float], pct: float) -> float:
+    """Linear-interpolated percentile of an already-sorted list (0 if empty)."""
+    if not sorted_vals:
+        return 0.0
+    if len(sorted_vals) == 1:
+        return round(sorted_vals[0], 2)
+    k = (len(sorted_vals) - 1) * pct
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    frac = k - lo
+    return round(sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * frac, 2)
 
 logger = logging.getLogger("adsim.traffic")
 
@@ -40,7 +54,24 @@ class TrafficRunner:
         self._buf_req: List[Dict[str, Any]] = []
         self._buf_evt: List[Dict[str, Any]] = []
         self._post_tasks: List[asyncio.Task] = []
+        self._latencies: List[float] = []
+        self._findings: Optional[FindingRecorder] = None
+        self._sched: float = 0.0
         self.stop_event = asyncio.Event()
+
+    def _ramp_offset(self, i: int, cfg: Dict[str, Any], interval: float) -> float:
+        """Cumulative dispatch offset (s) for request i, with optional linear RPS ramp-up."""
+        ramp = cfg.get("ramp_seconds") or 0
+        if ramp <= 0:
+            return i * interval
+        f0 = 0.1  # start at 10% of target RPS, ramp to 100% over `ramp` seconds
+        ramp_requests = max(1.0, cfg["rps"] * ramp * (1.0 + f0) / 2.0)
+        if i == 0:
+            self._sched = 0.0
+            return 0.0
+        frac = f0 + (1.0 - f0) * min(1.0, i / ramp_requests)
+        self._sched += interval / frac
+        return self._sched
 
     # ---------------------------------------------------------------- helpers
     async def _load_ad_units(self) -> List[Dict[str, Any]]:
@@ -81,6 +112,10 @@ class TrafficRunner:
             "fire_impressions": req.fire_impressions,
             "fire_clicks": req.fire_clicks,
             "fire_wins": req.fire_wins,
+            "fire_quartiles": req.fire_quartiles,
+            "ramp_seconds": req.ramp_seconds or 0,
+            "slo_p95_ms": req.slo_p95_ms,
+            "slo_error_rate": req.slo_error_rate,
         }
 
     # ------------------------------------------------------------------- main
@@ -91,6 +126,7 @@ class TrafficRunner:
                   kind: str = "traffic") -> Dict[str, Any]:
         cfg = self._merge(req)
         run_id = run_id or new_id("run-")
+        self._findings = FindingRecorder(self.db, run_id, cap=self.s.max_findings_per_run)
         ad_units = ad_units if ad_units is not None else await self._load_ad_units()
         campaign_cpm = await self._load_campaign_cpm()
         rng = random.Random()
@@ -110,7 +146,7 @@ class TrafficRunner:
 
         if not ad_units:
             msg = "No ad units found — run a seed first (POST /seed)."
-            await self._finalize(run_id, error=msg)
+            await self._finalize(run_id, error=msg, cfg=cfg)
             return {**self.stats, "error": msg}
 
         flusher = asyncio.create_task(self._flusher(progress_cb))
@@ -134,7 +170,7 @@ class TrafficRunner:
                     sem.release()
                     break
                 if interval:
-                    target = start + i * interval
+                    target = start + self._ramp_offset(i, cfg, interval)
                     delay = target - time.perf_counter()
                     if delay > 0:
                         await asyncio.sleep(delay)
@@ -148,7 +184,7 @@ class TrafficRunner:
         finally:
             flusher.cancel()
             await self._flush()
-            summary = await self._finalize(run_id)
+            summary = await self._finalize(run_id, cfg=cfg)
         if progress_cb:
             await _maybe_await(progress_cb({**self.stats, "done": True}))
         return summary
@@ -179,13 +215,21 @@ class TrafficRunner:
             self.stats["fills"] += 1
         else:
             self.stats["no_fills"] += 1
+        self.stats.setdefault("filler", 0)
+        if res.classification == "filler":
+            self.stats["filler"] += 1
+        if res.latency_ms:
+            self._latencies.append(res.latency_ms)
+        if self._findings:
+            self._findings.add_many(res.findings, request_id=res.trace_id)
 
         self._buf_req.append({
             "id": new_id(), "run_id": run_id, "ts": now_iso(), "ts_ms": now_ms(),
             "protocol": protocol, "tag_id": tag_id, "publisher_id": pub, "ad_unit_id": tag_id,
             "country": user.country, "device": user.device, "browser": user.browser,
             "user_id": user.user_id, "status_code": res.status_code, "latency_ms": res.latency_ms,
-            "filled": 1 if res.filled else 0, "winner_campaign": res.campaign,
+            "filled": 1 if res.filled else 0, "classification": res.classification,
+            "winner_campaign": res.campaign,
             "winner_campaign_id": res.campaign_id or campaign_id,
             "winner_creative_id": res.creative_id, "price": res.price if res.price is not None else cpm,
             "no_fill_reason": res.no_fill_reason, "trace_id": res.trace_id})
@@ -210,6 +254,18 @@ class TrafficRunner:
             self._buf_evt.append(evt)
             self.stats["impressions"] += 1
 
+            # Fire the full ordered quartile sequence (start..complete) like a player (S11).
+            if cfg.get("fire_quartiles") and res.tracking_events:
+                for q in await self.c.fire_quartiles(res):
+                    self._buf_evt.append({
+                        "id": new_id(), "run_id": run_id, "ts": now_iso(), "ts_ms": now_ms(),
+                        "type": f"quartile:{q['event']}", "request_id": res.trace_id, "tag_id": tag_id,
+                        "publisher_id": pub, "user_id": user.user_id, "campaign_id": campaign_id,
+                        "campaign": res.campaign, "price": None, "url": q["url"],
+                        "status_code": q["status_code"], "ok": 1 if q["ok"] else 0,
+                        "note": q.get("note"), "trace_id": res.trace_id})
+                    self.stats["quartiles"] = self.stats.get("quartiles", 0) + 1
+
             if cfg["fire_clicks"] and clicks.should_click(cfg["ctr"], rng):
                 cev = await clicks.fire_click(
                     self.c, self.s, run_id=run_id, result=res, tag_id=tag_id, publisher_id=pub,
@@ -218,17 +274,20 @@ class TrafficRunner:
                 self.stats["clicks"] += 1
 
             if cfg["fire_wins"] and price:
-                win = tracking.win_url(self.s, price=price, aid=tag_id, pub=pub,
-                                       trace_id=res.trace_id or new_id())
-                fired = await self.c.fire(win, normalize=False)
-                self._buf_evt.append({
-                    "id": new_id(), "run_id": run_id, "ts": now_iso(), "ts_ms": now_ms(),
-                    "type": "win", "request_id": res.trace_id, "tag_id": tag_id,
-                    "publisher_id": pub, "user_id": user.user_id, "campaign_id": campaign_id,
-                    "campaign": res.campaign, "price": price, "url": fired["url"],
-                    "status_code": fired["status_code"], "ok": 1 if fired["ok"] else 0,
-                    "note": fired.get("note"), "trace_id": res.trace_id})
-                self.stats["wins"] += 1
+                # Prefer the SUT-returned OpenRTB win notices (nurl/burl); for the
+                # VAST path (no nurl in markup) fall back to the canonical win pixel.
+                win_targets = res.win_urls or [tracking.win_url(
+                    self.s, price=price, aid=tag_id, pub=pub, trace_id=res.trace_id or new_id())]
+                for win in win_targets:
+                    fired = await self.c.fire(win, normalize=not bool(res.win_urls))
+                    self._buf_evt.append({
+                        "id": new_id(), "run_id": run_id, "ts": now_iso(), "ts_ms": now_ms(),
+                        "type": "win", "request_id": res.trace_id, "tag_id": tag_id,
+                        "publisher_id": pub, "user_id": user.user_id, "campaign_id": campaign_id,
+                        "campaign": res.campaign, "price": price, "url": fired["url"],
+                        "status_code": fired["status_code"], "ok": 1 if fired["ok"] else 0,
+                        "note": fired.get("note"), "trace_id": res.trace_id})
+                    self.stats["wins"] += 1
 
     def s_format(self) -> str:
         return "video"
@@ -257,12 +316,46 @@ class TrafficRunner:
             batch, self._buf_evt = self._buf_evt, []
             await self.db.insert_batch("events", batch)
 
-    async def _finalize(self, run_id: str, error: Optional[str] = None) -> Dict[str, Any]:
+    async def _finalize(self, run_id: str, error: Optional[str] = None,
+                        cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self.stats["ended_ms"] = now_ms()
         elapsed = (self.stats["ended_ms"] - self.stats["started_ms"]) / 1000.0
+        n = self.stats["requests"]
         self.stats["elapsed_s"] = round(elapsed, 2)
-        self.stats["rps_actual"] = round(self.stats["requests"] / elapsed, 2) if elapsed > 0 else 0
-        self.stats["fill_rate"] = round(self.stats["fills"] / self.stats["requests"], 4) if self.stats["requests"] else 0
+        self.stats["rps_actual"] = round(n / elapsed, 2) if elapsed > 0 else 0
+        self.stats["fill_rate"] = round(self.stats["fills"] / n, 4) if n else 0
+        self.stats["filler_rate"] = round(self.stats.get("filler", 0) / n, 4) if n else 0
+        self.stats["error_rate"] = round(self.stats["errors"] / n, 4) if n else 0
+
+        lat = sorted(self._latencies)
+        self.stats["latency"] = {
+            "p50_ms": percentile(lat, 0.50), "p95_ms": percentile(lat, 0.95),
+            "p99_ms": percentile(lat, 0.99), "max_ms": round(lat[-1], 2) if lat else 0.0,
+            "avg_ms": round(sum(lat) / len(lat), 2) if lat else 0.0,
+        }
+
+        # SLO verdict (S14): pass only if BOTH thresholds (when given) are met.
+        cfg = cfg or {}
+        slo_p95 = cfg.get("slo_p95_ms")
+        slo_err = cfg.get("slo_error_rate")
+        if slo_p95 is not None or slo_err is not None:
+            checks = []
+            if slo_p95 is not None:
+                checks.append(("p95_latency", self.stats["latency"]["p95_ms"] <= slo_p95,
+                               f"p95 {self.stats['latency']['p95_ms']}ms <= {slo_p95}ms"))
+            if slo_err is not None:
+                checks.append(("error_rate", self.stats["error_rate"] <= slo_err,
+                               f"error_rate {self.stats['error_rate']} <= {slo_err}"))
+            self.stats["slo"] = {
+                "verdict": "PASS" if all(ok for _, ok, _ in checks) else "FAIL",
+                "checks": [{"name": nm, "pass": ok, "detail": d} for nm, ok, d in checks],
+            }
+
+        if self._findings:
+            await self._findings.flush()
+            self.stats["finding_counts"] = self._findings.counts
+        self.stats["url_rewrite_notes"] = dict(self.c.url_rewrite_notes)
+        self.stats["macros_substituted"] = dict(self.c.macro_counts)
         if error:
             self.stats["error"] = error
         await self.db.execute(

@@ -152,5 +152,104 @@ export function Scenarios({ rows }) {
   )
 }
 
+const GRADE_TONE = { PASS: 'good', WARN: 'warn', FAIL: 'bad', INFO: undefined }
+
+export function Scorecard({ sc }) {
+  if (!sc || !sc.overall) return null
+  const o = sc.overall
+  return (
+    <Card title="Conformance Scorecard (IAB standards)"
+      right={<Badge verdict={o.grade === 'PASS' ? 'PASS' : o.grade === 'FAIL' ? 'FAIL' : 'WARN'}>{o.grade}</Badge>}>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        <Stat label="Checks" value={o.checks} />
+        <Stat label="Pass" value={o.pass} tone="good" />
+        <Stat label="Fail" value={o.fail} tone="bad" />
+        <Stat label="Warn" value={o.warn} tone="warn" />
+        <Stat label="Info" value={o.info} />
+      </div>
+      {sc.standards && sc.standards.length > 0 && (
+        <div className="mt-3 overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="text-xs uppercase text-slate-500">
+              <tr className="border-b border-slate-800">
+                <th className="py-2 pr-3">Standard</th><th className="py-2 pr-3">Grade</th>
+                <th className="py-2 pr-3 text-right">Pass</th><th className="py-2 pr-3 text-right">Fail</th>
+                <th className="py-2 pr-3 text-right">Warn</th><th className="py-2 text-right">Info</th>
+              </tr>
+            </thead>
+            <tbody className="text-slate-200">
+              {sc.standards.map((s, i) => (
+                <tr key={i} className="border-b border-slate-800/50">
+                  <td className="py-2 pr-3">{s.standard}</td>
+                  <td className="py-2 pr-3"><Badge verdict={s.grade === 'PASS' ? 'PASS' : s.grade === 'FAIL' ? 'FAIL' : 'WARN'}>{s.grade}</Badge></td>
+                  <td className="py-2 pr-3 text-right tabular-nums">{s.pass}</td>
+                  <td className="py-2 pr-3 text-right tabular-nums text-rose-300">{s.fail}</td>
+                  <td className="py-2 pr-3 text-right tabular-nums text-amber-300">{s.warn}</td>
+                  <td className="py-2 text-right tabular-nums text-slate-400">{s.info}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+export function FillBreakdown({ fb }) {
+  if (!fb || !fb.total) return null
+  return (
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <Stat label="Real fills" value={fb.real} sub={pct(fb.real_fill_rate)} tone="good" />
+      <Stat label="Filler" value={fb.filler} sub={pct(fb.filler_rate)} tone="warn" />
+      <Stat label="No-fill" value={fb.no_fill} />
+      <Stat label="Errors" value={fb.error} tone={fb.error ? 'bad' : undefined} />
+    </div>
+  )
+}
+
+export function Latency({ a }) {
+  if (!a) return null
+  return (
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+      <Stat label="p50 latency" value={`${a.p50_latency_ms ?? 0} ms`} />
+      <Stat label="p95 latency" value={`${a.p95_latency_ms ?? 0} ms`} tone="warn" />
+      <Stat label="p99 latency" value={`${a.p99_latency_ms ?? 0} ms`} tone="warn" />
+      <Stat label="Req / sec" value={a.requests_per_second} />
+      <Stat label="Error rate" value={pct(a.error_rate || 0)} tone={a.error_rate ? 'bad' : 'good'} />
+    </div>
+  )
+}
+
+export function Findings({ data }) {
+  const rows = (data && data.findings) || []
+  const fails = rows.filter((f) => f.severity === 'fail' || f.severity === 'warn')
+  if (fails.length === 0) return null
+  return (
+    <Card title={`Conformance findings (${fails.length} fail/warn)`}>
+      <div className="max-h-80 overflow-y-auto">
+        <table className="w-full text-left text-sm">
+          <thead className="text-xs uppercase text-slate-500">
+            <tr className="border-b border-slate-800">
+              <th className="py-2 pr-3">Sev</th><th className="py-2 pr-3">Standard</th>
+              <th className="py-2 pr-3">Spec</th><th className="py-2">Observed</th>
+            </tr>
+          </thead>
+          <tbody className="text-slate-200">
+            {fails.slice(0, 200).map((f, i) => (
+              <tr key={i} className="border-b border-slate-800/50 align-top">
+                <td className="py-2 pr-3"><Badge verdict={f.severity === 'fail' ? 'FAIL' : 'WARN'}>{f.severity}</Badge></td>
+                <td className="py-2 pr-3 whitespace-nowrap">{f.standard}</td>
+                <td className="py-2 pr-3 whitespace-nowrap text-slate-400">{f.spec_section}</td>
+                <td className="py-2 text-slate-300">{f.observed}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  )
+}
+
 const TT = { background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, fontSize: 12, color: '#e2e8f0' }
 const Empty = () => <div className="py-8 text-center text-sm text-slate-600">No data yet — seed and run traffic.</div>

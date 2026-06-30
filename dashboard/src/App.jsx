@@ -1,7 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api, openWS } from './api.js'
 import { Card, Stat, Button, Field, Input, Select, Badge, cls } from './ui.jsx'
-import { Overview, Auctions, CampaignTable, Charts, Scenarios } from './panels.jsx'
+import { Overview, Auctions, CampaignTable, Charts, Scenarios, Scorecard, FillBreakdown, Latency, Findings } from './panels.jsx'
+
+const SCENARIO_OPTIONS = [
+  ['all', 'All (S1–S15)'], ['S1', 'S1 · Smoke'], ['S2', 'S2 · Normal traffic'],
+  ['S3', 'S3 · Real-vs-filler'], ['S4', 'S4 · No-fill semantics'], ['S5', 'S5 · Geo targeting'],
+  ['S6', 'S6 · Frequency cap'], ['S7', 'S7 · Budget exhaustion'], ['S8', 'S8 · Schedule'],
+  ['S9', 'S9 · Ad pods / VMAP'], ['S10', 'S10 · OpenRTB conformance'], ['S11', 'S11 · Tracking accuracy'],
+  ['S12', 'S12 · Privacy (GDPR/GPP)'], ['S13', 'S13 · ads.txt / sellers.json'],
+  ['S14', 'S14 · Load / SLO'], ['S15', 'S15 · Resilience'],
+]
 
 export default function App() {
   const [health, setHealth] = useState(null)
@@ -10,7 +19,8 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [live, setLive] = useState(null)
   const [err, setErr] = useState(null)
-  const [metrics, setMetrics] = useState({ overview: null, campaigns: [], auctions: null, ts: [], scenarios: [] })
+  const [metrics, setMetrics] = useState({ overview: null, campaigns: [], auctions: null, ts: [], scenarios: [], scorecard: null, fill: null, findings: null })
+  const [target, setTarget] = useState(null)
 
   const [seed, setSeed] = useState({ publishers: 3, ad_units_per_publisher: 3, demand_partners: 3, advertisers: 3, campaigns: 6, cpm_min: 5, cpm_max: 150 })
   const [run, setRun] = useState({ protocols: 'vast', total_requests: 300, requests_per_second: 50, concurrency: 10, impression_rate: 0.9, ctr: 0.03 })
@@ -21,15 +31,17 @@ export default function App() {
 
   const loadMetrics = useCallback(async (rid) => {
     try {
-      const [overview, campaigns, auctions, ts, scenarios] = await Promise.all([
+      const [overview, campaigns, auctions, ts, scenarios, scorecard, fill, findings] = await Promise.all([
         api.overview(rid), api.campaigns(rid), api.auctions(rid), api.timeseries(rid), api.scenarios(''),
+        api.scorecard(rid).catch(() => null), api.fill(rid).catch(() => null), api.findings(rid).catch(() => null),
       ])
-      setMetrics({ overview, campaigns, auctions, ts, scenarios })
+      setMetrics({ overview, campaigns, auctions, ts, scenarios, scorecard, fill, findings })
     } catch (e) { setErr(String(e.message || e)) }
   }, [])
 
   useEffect(() => {
     api.health().then(setHealth).catch(() => setHealth({ ok: false }))
+    api.target().then(setTarget).catch(() => setTarget(null))
     loadRuns(); loadMetrics('')
     const ws = openWS((msg) => {
       if (msg.type === 'progress') { setLive(msg.stats); setBusy(true) }
@@ -69,6 +81,11 @@ export default function App() {
               {health?.ad_server_url || 'ad server'}
             </span>
             {health?.auth_role && <span className="text-slate-500">role: {health.auth_role}</span>}
+            {target?.discovery && (
+              <span className={cls(target.discovery.openapi_ok ? 'text-slate-400' : 'text-amber-400')}>
+                {target.discovery.openapi_ok ? `discovered ${target.discovery.path_count} routes` : 'discovery: default routes'}
+              </span>
+            )}
             {busy && <span className="text-amber-400 animate-pulse">● running…</span>}
           </div>
         </div>
@@ -103,16 +120,16 @@ export default function App() {
             <div className="mt-3 flex gap-2"><Button onClick={doRun} disabled={busy}>Run traffic</Button><Button onClick={doStop} variant="danger" disabled={!busy}>Stop</Button></div>
           </Card>
 
-          <Card title="3 · Business scenarios">
+          <Card title="3 · Conformance scenarios (S1–S15)">
             <Field label="Scenario"><Select value={scen} onChange={(e) => setScen(e.target.value)}>
-              <option value="all">All (A–D)</option>
-              <option value="A">A · Budget exhaustion</option>
-              <option value="B">B · Country targeting</option>
-              <option value="C">C · Bid competition</option>
-              <option value="D">D · Frequency cap</option>
+              {SCENARIO_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
             </Select></Field>
-            <p className="mt-2 text-xs text-slate-500">Each asserts the standard expected behaviour and reports PASS / GAP / FAIL with evidence.</p>
-            <div className="mt-3"><Button onClick={doScenario} disabled={busy}>Run scenario</Button></div>
+            <p className="mt-2 text-xs text-slate-500">Each asserts the IAB standard and reports PASS / GAP / BLOCKED / FAIL with evidence. "All" runs S1–S15 (1–2 min).</p>
+            <div className="mt-3 flex gap-2">
+              <Button onClick={doScenario} disabled={busy}>Run scenario</Button>
+              <Button variant="ghost" onClick={() => window.open('/api/report/markdown', '_blank')}>GAP report</Button>
+              <Button variant="ghost" onClick={() => window.open('/api/report/gaps.json', '_blank')}>gaps.json</Button>
+            </div>
           </Card>
         </div>
 
@@ -138,12 +155,16 @@ export default function App() {
           <Button variant="ghost" onClick={() => loadMetrics(runId)}>Refresh</Button>
         </div>
 
+        <Scorecard sc={metrics.scorecard} />
         <Overview o={metrics.overview} />
+        <FillBreakdown fb={metrics.fill} />
+        <Latency a={metrics.auctions} />
         <Charts ts={metrics.ts} />
         <div className="grid gap-3 lg:grid-cols-2">
           <CampaignTable rows={metrics.campaigns} />
           <Auctions a={metrics.auctions} />
         </div>
+        <Findings data={metrics.findings} />
         <Scenarios rows={metrics.scenarios} />
 
         <footer className="pt-4 text-center text-xs text-slate-600">
