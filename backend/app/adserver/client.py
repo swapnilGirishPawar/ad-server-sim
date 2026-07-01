@@ -189,11 +189,30 @@ class AdServerClient:
             "zone_type": "vast", "width": width, "height": height, "status": "active",
         })
 
-    async def create_advertiser(self, name: str) -> Dict[str, Any]:
+    async def create_advertiser(self, name: str, credit_limit: float = 0.0) -> Dict[str, Any]:
+        # `credit_limit` is the advertiser's financial cap on the SUT (the only
+        # editable financial field on create/update). The seeder sizes it to cover
+        # the sum of the advertiser's campaign budgets.
         return await self._post("/advertisers", {
             "name": name, "status": "active",
             "domain": f"{name.lower().replace(' ', '')}.com",
+            "credit_limit": round(float(credit_limit), 2),
         })
+
+    async def credit_advertiser(self, advertiser_id: str, amount: float,
+                                note: str = "seed: fund available balance") -> Dict[str, Any]:
+        # The SUT computes available_balance = SUM(advertiser_ledger.amount); creation
+        # seeds it to 0. Posting a credit_adjustment funds the advertiser so its
+        # available balance equals its credit limit.
+        return await self._post(f"/advertisers/{advertiser_id}/ledger", {
+            "event_type": "credit_adjustment", "amount": round(float(amount), 2), "note": note,
+        })
+
+    async def advertiser_balance(self, advertiser_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            return await self._get(f"/advertisers/{advertiser_id}/balance")
+        except AdServerError:
+            return None
 
     async def create_demand_partner(self, name: str, ad_format: str, bid_floor: float,
                                     endpoint_url: str = "") -> Dict[str, Any]:
