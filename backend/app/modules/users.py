@@ -27,7 +27,7 @@ class UserPool:
                  pool_size: int = 200, returning_ratio: float = 0.6,
                  rng: Optional[random.Random] = None) -> None:
         self.countries = countries or ["IN", "US", "UK", "CA"]
-        self.devices = devices or ["mobile", "desktop", "tablet"]
+        self.devices = devices or ["ctv", "mobile", "desktop", "tablet"]
         self.browsers = browsers or ["chrome", "firefox", "safari", "edge"]
         self.returning_ratio = returning_ratio
         self.rng = rng or random.Random()

@@ -35,6 +35,97 @@ export const api = {
   report: (r) => j('GET', '/report' + q(r)),
   dsp: () => j('GET', '/dsp'),
   dspConfig: (b) => j('POST', '/dsp/config', b),
+  flowOrtb: (b) => j('POST', '/flow/ortb', b),
+  publisherRequest: (b) => j('POST', '/publisher-request', b),
+}
+
+// The mock DSP lives at /dsp/bid (NOT under /api) — same origin, so the browser
+// can call it directly to show the DSP's own raw bid response.
+export async function dspBidRaw() {
+  const sample = {
+    id: 'dashboard-raw-1',
+    at: 1,
+    tmax: 660,
+    cur: ['USD'],
+    bcat: ['IAB26'],
+    imp: [{
+      id: '1',
+      tagid: '351511',
+      bidfloor: 5.775,
+      bidfloorcur: 'USD',
+      clickbrowser: 0,
+      secure: 1,
+      video: {
+        mimes: ['video/mp4'],
+        minduration: 3,
+        maxduration: 300,
+        startdelay: 0,
+        protocols: [1, 2, 3, 4, 5, 6],
+        w: 1920,
+        h: 1080,
+        linearity: 1,
+        sequence: 1,
+        boxingallowed: 1,
+        playbackmethod: [1],
+        api: [1, 2],
+      },
+    }],
+    app: {
+      id: '9887674',
+      name: 'Philo: Shows, Movies, and Live TV',
+      bundle: 'G22223020133',
+      storeurl: 'https://samsung.com/us/appstore/app/G22223020133',
+      cat: ['IAB4', 'IAB5', 'IAB2', 'IAB3', 'IAB1'],
+      publisher: { id: '1192' },
+      content: {
+        genre: 'Adventure',
+        cat: ['IAB1-5'],
+        videoquality: 1,
+        context: 1,
+        contentrating: 'TV-MA',
+        livestream: 0,
+        len: 1380,
+        language: 'en',
+      },
+    },
+    device: {
+      geo: { lat: 32.9074, lon: -97.4257, type: 2, country: 'USA', region: 'TX', city: 'Fort Worth', zip: '76179' },
+      dnt: 0,
+      lmt: 0,
+      ua: 'Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) 76.0.3809.146/6.0 TV Safari/537.36',
+      ip: '132.147.164.4',
+      devicetype: 3,
+      make: 'Samsung',
+      model: 'UN70TU6985FXZA',
+      os: 'Tizen',
+      osv: '6.0',
+      js: 1,
+      language: 'en',
+      carrier: 'Nextlink Broadband',
+      connectiontype: 2,
+      ifa: 'df8ee962-af95-4a77-b0ad-4bbb6ff86c0b',
+      ext: { ifa_type: 'tifa' },
+    },
+    user: {},
+    source: {
+      fd: 1,
+      tid: '85x1CF677D5AED84A08',
+      ext: {
+        schain: {
+          complete: 1,
+          ver: '1.0',
+          nodes: [{ asi: 'voisetech.com', sid: '1192', rid: 'dashboard-raw-1', hp: 1 }],
+        },
+      },
+    },
+    regs: { coppa: 0, ext: { us_privacy: '1YNN' } },
+  }
+  const res = await fetch('/dsp/bid', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sample),
+  })
+  if (res.status === 204) return { _note: 'HTTP 204 — DSP no-bid (no body)' }
+  const text = await res.text()
+  return text ? JSON.parse(text) : { _note: `HTTP ${res.status}` }
 }
 
 export function openWS(onMsg) {

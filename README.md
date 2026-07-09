@@ -85,6 +85,57 @@ The SUT is **VAST/video-centric**. The simulator drives the **actually-mounted**
 Target discovery resolves these at startup; if `/openapi.json` is unreachable it falls back to
 the corrected defaults above.
 
+## Mock DSP (OpenRTB bidder)
+
+The simulator ships a **mock DSP** (`app/dsp/router.py`, mounted at `/dsp`) that behaves
+like a real demand-side platform so the SUT's auction has something to bid against.
+
+**How it bids** (per IAB OpenRTB 2.5/2.6):
+1. The ad server POSTs a `BidRequest` to `http://<sim>/dsp/bid` (seed it as a demand partner
+   with `POST /api/seed {"seed_fake_dsp": true}`; the endpoint is `SIM_PUBLIC_URL + /dsp/bid`).
+2. For **each `imp`** the DSP reads the format (video/banner/native/audio), size, and
+   `bidfloor`, computes a valuation `min(max_cpm, max(price, floor × bid_margin))` with a bit
+   of jitter, and — if it clears the floor — emits a bid.
+3. It returns a spec-correct `BidResponse`: `seatbid[].bid[]` with `impid`, `price`, `adm`
+   (VAST for video, HTML for banner), `nurl`/`burl`/`lurl` carrying `${AUCTION_PRICE}` +
+   `${AUCTION_ID}`/`${AUCTION_IMP_ID}` + `[CACHEBUSTING]`, `crid`, `adid`, `cid`, `adomain`,
+   `cat`, `mtype` (1/2/3/4), `w`/`h`, and `dealid` if the imp carries a matching `pmp.deal`.
+   It bids on **every** eligible imp, so CTV/pod requests get one bid per slot.
+4. **No-bid** = bare **HTTP 204**, or `200 {id, nbr}` with an OpenRTB No-Bid Reason code
+   (0 Unknown … 6 Unsupported device … 10 Daily cap) — toggled by `emit_nbr`.
+
+**Watch it in the backend terminal.** Every request + decision is logged (set by `verbose`):
+```
+==================================================================
+  MOCK DSP  <--  OpenRTB bid request
+------------------------------------------------------------------
+  request id : auction-7f3a
+  imps       : 1  [video 640x480 floor=2.50]
+  inventory  : app com.voisesim.ctv
+  device     : type=3 geo=USA ifa=IDFA-abc
+  privacy    : gdpr=1 usp=1YNN gpp=-   schain=y
+------------------------------------------------------------------
+  DECISION   : BID   seat=voise-fake-dsp  cur=USD
+    bid impid=1  $5.90 USD  mtype=2  crid=fake-dsp-creative-1  adomain=['fakedsp-advertiser.com']
+    nurl     : https://fakedsp-advertiser.com/win?price=${AUCTION_PRICE}&aid=${AUCTION_ID}&...
+==================================================================
+```
+
+**Control it at runtime** (`POST /api/dsp/config` or `/dsp/config`):
+```bash
+curl -X POST localhost:8090/api/dsp/config -H 'Content-Type: application/json' \
+  -d '{"mode":"bid","price":8.0,"bid_margin":1.3,"max_cpm":30,"respect_floor":true}'
+# modes: bid | no_bid | timeout | error ;  emit_nbr, bid_rate, seat, adomain, crid, cat, verbose
+curl localhost:8090/api/dsp          # live config + stats (requests/bids/no_bids/last_response)
+```
+
+**Try it directly** (see the log print in the terminal running uvicorn):
+```bash
+curl -X POST localhost:8090/dsp/bid/tag1 -H 'Content-Type: application/json' \
+  -d '{"id":"r1","imp":[{"id":"1","bidfloor":2.5,"video":{"w":640,"h":480}}],"site":{"id":"s"},"device":{"devicetype":2}}'
+```
+Run it standalone on its own port with `python -m app.dsp.router` (→ `:8095/dsp/bid`).
+
 ## Conformance
 
 Every VAST/OpenRTB response and supply-chain file is run through the validators, which emit
@@ -164,10 +215,17 @@ The container reaches a host ad server via `host.docker.internal:8001`. For S10,
 ## Usage
 
 ### Dashboard (recommended)
-Open `http://localhost:8090`, then **1 · Seed** → **2 · Generate traffic** → **3 · Scenarios**.
-The page shows the conformance **scorecard**, real-vs-filler **fill breakdown**, **latency
-percentiles**, charts, the **findings** table, and per-scenario verdicts. Use **GAP report** /
-**gaps.json** buttons to export.
+Open `http://localhost:8090`. Two tabs in the header:
+- **Dashboard** — **1 · Seed** → **2 · Generate traffic** → **3 · Scenarios**. Shows the
+  conformance **scorecard**, real-vs-filler **fill breakdown**, **latency percentiles**,
+  charts, the **findings** table, and per-scenario verdicts. Use **GAP report** / **gaps.json** to export.
+- **Publisher Ad Request** — a focused tester: type in a **publisher id + ad unit / tag id**,
+  choose the IAB request **type** (VAST tag `GET` or OpenRTB bid request `POST`) and — for
+  OpenRTB — the **format** (video / banner / native / audio) and app-vs-site, set **how many
+  requests**, then **Preview** the exact IAB request or **Send** N of them at the ad server.
+  You get the sample request, a sample response (with conformance findings), aggregate tiles
+  (fill / no-fill / errors / latency), and a per-request table. No seeding needed — serving
+  endpoints are public. You can also paste a **real publisher OpenRTB body** and fire it verbatim.
 
 ### HTTP API (port 8090, under `/api`)
 ```bash
@@ -175,6 +233,13 @@ curl localhost:8090/api/target                      # what live routes were disc
 curl -X POST localhost:8090/api/seed -d '{"campaigns":6,"seed_fake_dsp":true}' -H 'Content-Type: application/json'
 curl -X POST localhost:8090/api/run  -d '{"total_requests":300,"protocols":["vast"],"fire_quartiles":true}' -H 'Content-Type: application/json'
 curl -X POST localhost:8090/api/scenario -d '{"scenario":"all"}' -H 'Content-Type: application/json'   # S1..S15 | A-D | all
+# Publisher ad request tester — fire N IAB requests for a specific publisher + tag:
+curl -X POST localhost:8090/api/publisher-request -H 'Content-Type: application/json' \
+  -d '{"protocol":"ortb","ad_format":"video","publisher_id":"1192","tag_id":"351511","count":5}'
+curl -X POST localhost:8090/api/publisher-request -H 'Content-Type: application/json' \
+  -d '{"protocol":"vast","publisher_id":"1192","tag_id":"351511","count":5}'
+curl -X POST localhost:8090/api/publisher-request -H 'Content-Type: application/json' \
+  -d '{"protocol":"ortb","tag_id":"351511","preview_only":true}'   # build only, do not send
 curl localhost:8090/api/metrics/scorecard
 curl localhost:8090/api/metrics/fill
 curl localhost:8090/api/metrics/reconcile           # sim-vs-server, within-tolerance verdict

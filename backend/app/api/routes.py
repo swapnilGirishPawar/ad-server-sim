@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse
@@ -12,7 +12,9 @@ from app import report as report_mod
 from app.adserver.client import AdServerClient, AdServerError
 from app.config import Settings
 from app.db import Database
-from app.models import DspConfig, RunRequest, ScenarioRequest, SeedRequest
+from app.models import (
+    DspConfig, FlowRequest, PublisherAdRequest, RunRequest, ScenarioRequest, SeedRequest,
+)
 from app.modules import metrics
 from app.modules.seeder import Seeder
 
@@ -208,6 +210,228 @@ async def dsp_config(request: Request, cfg: DspConfig):
         if k in dsp.CONFIG:
             dsp.CONFIG[k] = v
     return dsp.CONFIG
+
+
+# --------------------------------------------------------------- Flow B (one click)
+@router.post("/flow/ortb")
+async def flow_ortb(request: Request, body: FlowRequest):
+    """Run ONE OpenRTB auction end-to-end: (optionally set the DSP mode) -> POST a
+    spec-correct bid request to the ad server -> the ad server fans out to our mock
+    DSP -> return the DSP's decision + the ad server's winning bid. Done server-side
+    so the browser avoids CORS/timeout issues with the ad server."""
+    import time as _time
+
+    import httpx
+
+    from app.adserver import ortb as ortb_mod
+    from app.adserver import validators
+    from app.dsp import router as dsp
+    from app.util import new_id
+
+    s, db, client, _ = _state(request)
+
+    if body.dsp_mode:
+        dsp.CONFIG["mode"] = body.dsp_mode
+
+    tag_id = body.tag_id
+    if not tag_id:
+        row = await db.fetchone(
+            "SELECT numeric_id, server_id FROM seed_entities WHERE kind='ad_unit' "
+            "ORDER BY created_at DESC LIMIT 1")
+        if row:
+            tag_id = row["numeric_id"] or row["server_id"]
+    if not tag_id:
+        raise HTTPException(status_code=400, detail="No tag_id available — run Seed first.")
+
+    req_id = new_id("flow-")
+    bid_req = ortb_mod.build_bid_request(
+        request_id=req_id, tag_id=str(tag_id), publisher_id="pub-1",
+        country=body.country, device=body.device, browser="chrome",
+        user_id="flow-user", bidfloor=body.bidfloor)
+
+    reqs_before = dsp.STATS.get("requests", 0)
+    path = client.routes.get("ortb_auction", "/api/b/{tag_id}").format(tag_id=tag_id)
+    url = f"{s.root_base}{path}"
+
+    status, payload, text, err = 0, None, "", None
+    t0 = _time.perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=body.timeout_s, verify=s.verify_tls) as c:
+            r = await c.post(url, params={"pub": "pub-1"}, json=bid_req)
+            status, text = r.status_code, r.text
+            if r.content:
+                try:
+                    payload = r.json()
+                except ValueError:
+                    payload = None
+    except httpx.HTTPError as e:
+        err = f"{type(e).__name__}: {e}"
+    latency = round((_time.perf_counter() - t0) * 1000, 1)
+
+    parsed = ortb_mod.parse_bid_response(status, payload)
+    vres = validators.validate_bid_response(status, payload, request=bid_req,
+                                            endpoint=client.routes.get("ortb_auction", ""))
+    dsp_called = dsp.STATS.get("requests", 0) > reqs_before
+
+    return {
+        "tag_id": str(tag_id),
+        "endpoint": url,
+        "request_summary": {
+            "id": req_id, "bidfloor": body.bidfloor, "device": body.device,
+            "country": body.country, "format": "video 1920x1080 CTV",
+        },
+        "dsp": {
+            "mode": dsp.CONFIG["mode"],
+            "called_by_ad_server": dsp_called,
+            "decision": dsp.STATS.get("last_response"),
+            "request_seen": dsp.STATS.get("last_request"),
+        },
+        "ad_server": {
+            "status": status,
+            "latency_ms": latency,
+            "won": bool(parsed["filled"]),
+            "winner_seat": parsed.get("seat"),
+            "price": parsed.get("price"),
+            "adm_has_vast": bool(parsed.get("adm") and "VAST" in (parsed.get("adm") or "")),
+            "dsp_nurl_chained": bool(parsed.get("nurl") and "dsp_nurl=" in (parsed.get("nurl") or "")),
+            "nbr": payload.get("nbr") if isinstance(payload, dict) else None,
+            "conformant": vres.conformant,
+            "fail_findings": [f.to_dict() for f in vres.findings if f.severity == validators.FAIL],
+            "error": err,
+        },
+        "raw_response": payload if isinstance(payload, dict) else (text[:4000] or None),
+    }
+
+
+# -------------------------------------------------- Publisher ad request tester
+@router.post("/publisher-request")
+async def publisher_request(request: Request, req: PublisherAdRequest):
+    """Fire N IAB-compliant *publisher ad requests* (VAST tag or OpenRTB bid
+    request) at the ad server for a specific publisher + ad unit, and report
+    exactly what came back per request + in aggregate.
+
+    Self-contained: serving endpoints are public, so no seeding/auth is needed —
+    you supply the publisher_id + tag_id. `preview_only` builds the request(s)
+    and returns them WITHOUT sending, so you can inspect the IAB shape."""
+    import asyncio
+    import time as _time
+
+    from app.adserver import ortb as ortb_mod
+    from app.util import new_id
+
+    s, db, client, _ = _state(request)
+    protocol = (req.protocol or "ortb").lower()
+    privacy = {k: v for k, v in {
+        "gdpr": req.gdpr, "gdpr_consent": req.gdpr_consent, "consent": req.gdpr_consent,
+        "us_privacy": req.us_privacy, "gpp": req.gpp, "coppa": req.coppa,
+    }.items() if v is not None}
+
+    # ---- the sample request, shown in the UI so the IAB shape is visible ----
+    if protocol == "vast":
+        path = client.routes.get("vast_canonical", "/api/v/{tag_id}").format(tag_id=req.tag_id)
+        params: Dict[str, Any] = {"pub": req.publisher_id, "w": req.width, "h": req.height,
+                                  "ifa": "<per-request-uuid>"}
+        if req.device in ("ctv", "tv"):
+            params["devicetype"] = 3
+        if req.country:
+            params["country"] = req.country
+        for k in ("gdpr", "gdpr_consent", "us_privacy", "gpp"):
+            if privacy.get(k) is not None:
+                params[k] = privacy[k]
+        sample = {"method": "GET", "url": f"{s.root_base}{path}", "params": params}
+    else:
+        if req.custom_request:
+            sample_body: Dict[str, Any] = dict(req.custom_request)
+        else:
+            sample_body = ortb_mod.build_bid_request(
+                request_id="<per-request-id>", tag_id=req.tag_id, publisher_id=req.publisher_id,
+                country=req.country, device=req.device, browser="chrome", user_id="<ifa>",
+                width=req.width, height=req.height, ad_format=req.ad_format, bidfloor=req.bidfloor,
+                app_mode=req.app_mode, gdpr=req.gdpr, consent=req.gdpr_consent,
+                us_privacy=req.us_privacy, gpp=req.gpp, coppa=req.coppa)
+        path = client.routes.get("ortb_auction", "/api/b/{tag_id}").format(tag_id=req.tag_id)
+        sample = {"method": "POST", "url": f"{s.root_base}{path}",
+                  "params": {"pub": req.publisher_id}, "body": sample_body}
+
+    if req.preview_only:
+        return {"protocol": protocol, "endpoint": sample["url"], "count": req.count,
+                "preview": True, "sample_request": sample, "results": [], "summary": None}
+
+    # ---- fire N requests with bounded concurrency ----
+    sem = asyncio.Semaphore(req.concurrency)
+
+    async def one(i: int) -> Dict[str, Any]:
+        async with sem:
+            if protocol == "vast":
+                res = await client.request_vast(
+                    tag_id=req.tag_id, publisher_id=req.publisher_id, device=req.device,
+                    user_id=new_id("u-"), width=req.width, height=req.height,
+                    country=req.country, privacy=privacy or None)
+            elif req.custom_request:
+                body = dict(req.custom_request)
+                if req.randomize_id:
+                    body["id"] = new_id("bid-")
+                res = await client.request_ortb_custom(
+                    tag_id=req.tag_id, publisher_id=req.publisher_id, body=body)
+            else:
+                res = await client.request_ortb(
+                    tag_id=req.tag_id, publisher_id=req.publisher_id, country=req.country,
+                    device=req.device, browser="chrome", user_id=new_id("u-"),
+                    width=req.width, height=req.height, ad_format=req.ad_format,
+                    bidfloor=req.bidfloor, app_mode=req.app_mode, privacy=privacy or None)
+        fail_count = sum(1 for f in res.findings if f.get("severity") == "fail")
+        return {"i": i + 1, "status_code": res.status_code, "latency_ms": round(res.latency_ms, 1),
+                "filled": res.filled, "classification": res.classification, "price": res.price,
+                "campaign": res.campaign, "creative_id": res.creative_id,
+                "no_fill_reason": res.no_fill_reason, "trace_id": res.trace_id,
+                "conformant": fail_count == 0, "fail_count": fail_count,
+                "findings": res.findings, "raw": res.raw}
+
+    t0 = _time.perf_counter()
+    full: List[Dict[str, Any]] = list(await asyncio.gather(*[one(i) for i in range(req.count)]))
+    elapsed = round((_time.perf_counter() - t0) * 1000, 1)
+
+    # ---- aggregate (keep per-row payload light; heavy detail from one sample) ----
+    row_keys = ("i", "status_code", "latency_ms", "filled", "classification", "price",
+                "campaign", "creative_id", "no_fill_reason", "trace_id", "conformant", "fail_count")
+    results = [{k: r[k] for k in row_keys} for r in full]
+
+    lat = sorted(r["latency_ms"] for r in full if r["latency_ms"])
+    def _pctl(p: float) -> float:
+        if not lat:
+            return 0.0
+        k = (len(lat) - 1) * p
+        lo = int(k); hi = min(lo + 1, len(lat) - 1)
+        return round(lat[lo] + (lat[hi] - lat[lo]) * (k - lo), 1)
+
+    status_hist: Dict[str, int] = {}
+    for r in full:
+        key = str(r["status_code"])
+        status_hist[key] = status_hist.get(key, 0) + 1
+    filled = sum(1 for r in full if r["filled"])
+    errors = sum(1 for r in full if r["status_code"] == 0 or r["status_code"] >= 500)
+    no_fill = len(full) - filled - errors
+    # Conformance is only meaningful for requests that actually got a response.
+    responded = [r for r in full if not (r["status_code"] == 0 or r["status_code"] >= 500)]
+    conformant = sum(1 for r in responded if r["conformant"])
+    summary = {
+        "count": len(full), "filled": filled, "no_fill": no_fill, "errors": errors,
+        "fill_rate": round(filled / len(full), 4) if full else 0.0,
+        "responded": len(responded),
+        "conformant": conformant, "non_conformant": len(responded) - conformant,
+        "avg_latency_ms": round(sum(lat) / len(lat), 1) if lat else 0.0,
+        "p95_latency_ms": _pctl(0.95), "elapsed_ms": elapsed, "status_codes": status_hist,
+    }
+    # Prefer a non-conformant sample so gaps are visible; else the first response.
+    rep = next((r for r in full if not r["conformant"]), full[0]) if full else None
+    sample_response = None if rep is None else {
+        "status_code": rep["status_code"], "classification": rep["classification"],
+        "price": rep["price"], "trace_id": rep["trace_id"],
+        "findings": rep["findings"], "raw": rep["raw"],
+    }
+    return {"protocol": protocol, "endpoint": sample["url"], "count": req.count, "preview": False,
+            "sample_request": sample, "sample_response": sample_response,
+            "results": results, "summary": summary}
 
 
 @router.get("/metrics/cross-check")

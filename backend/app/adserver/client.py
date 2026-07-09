@@ -400,8 +400,8 @@ class AdServerClient:
 
     async def request_ortb(self, *, tag_id: str, publisher_id: str, country: str,
                            device: str, browser: str, user_id: str,
-                           width: int = 640, height: int = 480,
-                           ad_format: str = "video", bidfloor: float = 0.1,
+                           width: int = 1920, height: int = 1080,
+                           ad_format: str = "video", bidfloor: float = 5.775,
                            privacy: Optional[Dict[str, Any]] = None,
                            pod: Optional[Dict[str, Any]] = None,
                            app_mode: bool = False, ifa: Optional[str] = None) -> AdResult:
@@ -416,6 +416,12 @@ class AdServerClient:
             us_privacy=privacy.get("us_privacy"), gpp=privacy.get("gpp"),
             gpp_sid=privacy.get("gpp_sid"), coppa=privacy.get("coppa"), pod=pod,
         )
+        return await self._dispatch_ortb(tag_id=tag_id, publisher_id=publisher_id,
+                                         body=body, req_id=req_id)
+
+    async def _dispatch_ortb(self, *, tag_id: str, publisher_id: str,
+                             body: Dict[str, Any], req_id: str) -> AdResult:
+        """POST a prebuilt OpenRTB bid request, validate the response, normalise to AdResult."""
         endpoint = self.routes.get("ortb_auction", "")
         t0 = time.perf_counter()
         try:
@@ -451,6 +457,14 @@ class AdServerClient:
             no_fill_reason=parsed["no_fill_reason"], trace_id=req_id,
             raw=(r.text[:2000] if r.content else ""),
         )
+
+    async def request_ortb_custom(self, *, tag_id: str, publisher_id: str,
+                                  body: Dict[str, Any]) -> AdResult:
+        """Send a caller-supplied OpenRTB bid request verbatim (e.g. a real publisher
+        sample pasted into the UI), validated into the same AdResult shape."""
+        req_id = str(body.get("id") or new_id("bid-"))
+        return await self._dispatch_ortb(tag_id=tag_id, publisher_id=publisher_id,
+                                         body=body, req_id=req_id)
 
     # -------------------------------------------------------------- tracking
     async def fire(self, url: str, normalize: bool = True, *, errorcode: Optional[int] = None,

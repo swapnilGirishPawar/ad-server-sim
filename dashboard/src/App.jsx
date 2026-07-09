@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api, openWS } from './api.js'
 import { Card, Stat, Button, Field, Input, Select, Badge, cls } from './ui.jsx'
-import { Overview, Auctions, CampaignTable, Charts, Scenarios, Scorecard, FillBreakdown, Latency, Findings } from './panels.jsx'
+import { Overview, Auctions, CampaignTable, Charts, Scenarios, Scorecard, FillBreakdown, Latency, Findings, FlowB } from './panels.jsx'
+import PublisherRequest from './publisher.jsx'
 
 const SCENARIO_OPTIONS = [
   ['all', 'All (S1–S15)'], ['S1', 'S1 · Smoke'], ['S2', 'S2 · Normal traffic'],
@@ -13,6 +14,7 @@ const SCENARIO_OPTIONS = [
 ]
 
 export default function App() {
+  const [view, setView] = useState('dashboard')  // 'dashboard' | 'publisher'
   const [health, setHealth] = useState(null)
   const [runs, setRuns] = useState([])
   const [runId, setRunId] = useState('')        // '' = all runs
@@ -89,9 +91,20 @@ export default function App() {
             {busy && <span className="text-amber-400 animate-pulse">● running…</span>}
           </div>
         </div>
+        <nav className="mt-2 flex gap-1">
+          {[['dashboard', 'Dashboard'], ['publisher', 'Publisher Ad Request']].map(([v, label]) => (
+            <button key={v} onClick={() => setView(v)}
+              className={cls('rounded-md px-3 py-1 text-sm font-medium transition',
+                view === v ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200')}>
+              {label}
+            </button>
+          ))}
+        </nav>
       </header>
 
       <main className="mx-auto max-w-7xl space-y-4 p-6">
+        {view === 'publisher' ? <PublisherRequest /> : (
+        <>
         {err && <div className="rounded-lg border border-rose-800 bg-rose-950/40 px-3 py-2 text-sm text-rose-300">{String(err)}</div>}
 
         {/* Controls */}
@@ -133,6 +146,9 @@ export default function App() {
           </Card>
         </div>
 
+        {/* Flow B — OpenRTB auction against the mock DSP (one click) */}
+        <FlowB />
+
         {/* Live progress */}
         {live && (
           <Card title="Live run">
@@ -170,6 +186,8 @@ export default function App() {
         <footer className="pt-4 text-center text-xs text-slate-600">
           Ad Server Simulator · the simulator is the source of truth; GAP/FAIL verdicts indicate ad-server gaps, not simulator errors.
         </footer>
+        </>
+        )}
       </main>
     </div>
   )

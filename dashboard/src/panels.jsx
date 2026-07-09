@@ -1,9 +1,10 @@
-import React from 'react'
+import React, { useState } from 'react'
 import {
   ResponsiveContainer, LineChart, Line, AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from 'recharts'
-import { Card, Stat, Badge } from './ui.jsx'
+import { Card, Stat, Badge, Button, Select, Field } from './ui.jsx'
+import { api, dspBidRaw } from './api.js'
 
 const fmtTime = (ms) => {
   const d = new Date(ms)
@@ -248,6 +249,102 @@ export function Findings({ data }) {
         </table>
       </div>
     </Card>
+  )
+}
+
+export function FlowB() {
+  const [mode, setMode] = useState('bid')
+  const [busy, setBusy] = useState(false)
+  const [res, setRes] = useState(null)
+  const [raw, setRaw] = useState(null)
+  const [err, setErr] = useState(null)
+
+  const run = async () => {
+    setErr(null); setRaw(null); setBusy(true)
+    try { setRes(await api.flowOrtb({ dsp_mode: mode })) }
+    catch (e) { setErr(String(e.message || e)) }
+    finally { setBusy(false) }
+  }
+  const showRaw = async () => {
+    setErr(null)
+    try { await api.dspConfig({ mode }); setRaw(await dspBidRaw()) }
+    catch (e) { setErr(String(e.message || e)) }
+  }
+
+  const ad = res && res.ad_server
+  const won = ad && ad.won
+  return (
+    <Card title="Flow B · OpenRTB Auction (Mock DSP)"
+      right={<span className="text-xs text-slate-500">ad server ⇄ mock DSP, end-to-end</span>}>
+      <div className="flex flex-wrap items-end gap-2">
+        <Field label="DSP behaviour">
+          <Select value={mode} onChange={(e) => setMode(e.target.value)}>
+            <option value="bid">bid (buy)</option>
+            <option value="no_bid">no_bid (refuse)</option>
+            <option value="timeout">timeout</option>
+            <option value="error">error (500)</option>
+          </Select>
+        </Field>
+        <Button onClick={run} disabled={busy}>{busy ? 'Running auction…' : 'Run auction'}</Button>
+        <Button variant="ghost" onClick={showRaw} disabled={busy}>Show raw DSP bid</Button>
+        <span className="text-xs text-slate-500">First run can take ~30s (ad-server cold start).</span>
+      </div>
+
+      {err && <div className="mt-3 rounded-lg border border-rose-800 bg-rose-950/40 px-3 py-2 text-sm text-rose-300">{err}</div>}
+
+      {res && (
+        <div className="mt-4 space-y-3">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+              <div className="text-xs uppercase tracking-wide text-slate-400">DSP decision</div>
+              <div className="mt-1">
+                <Badge verdict={res.dsp?.decision?.decision === 'bid' ? 'PASS' : 'WARN'}>
+                  {res.dsp?.decision?.decision === 'bid' ? 'BID' : 'NO-BID'}
+                </Badge>
+              </div>
+              <div className="mt-1 text-xs text-slate-500">called by ad server: {String(res.dsp?.called_by_ad_server)}</div>
+            </div>
+            <Stat label="Ad server outcome" value={won ? 'WON' : 'NO WINNER'} tone={won ? 'good' : 'warn'}
+              sub={`HTTP ${ad.status}`} />
+            <Stat label="Clearing price" value={ad.price != null ? `$${ad.price}` : '—'}
+              sub={ad.winner_seat ? `seat: ${ad.winner_seat}` : ''} />
+            <Stat label="Auction latency" value={`${ad.latency_ms} ms`}
+              sub={ad.conformant ? 'spec-conformant ✓' : 'conformance fail'} tone={ad.conformant ? 'good' : 'bad'} />
+          </div>
+
+          <div className="grid gap-2 text-sm md:grid-cols-2">
+            <Flag ok={ad.adm_has_vast} label="VAST creative returned (adm)" />
+            <Flag ok={ad.dsp_nurl_chained} label="DSP win-notice chained (dsp_nurl)" />
+          </div>
+          {ad.error && <div className="text-sm text-rose-300">Ad server error: {ad.error} — try again (cold start / raise timeout).</div>}
+          {ad.fail_findings?.length > 0 && (
+            <ul className="list-disc space-y-1 pl-5 text-xs text-rose-300">
+              {ad.fail_findings.map((f, i) => <li key={i}>{f.spec_section}: {f.observed}</li>)}
+            </ul>
+          )}
+          <details className="text-xs">
+            <summary className="cursor-pointer text-slate-400">Ad server response (raw)</summary>
+            <pre className="mt-2 max-h-72 overflow-auto rounded-lg bg-slate-950 p-3 text-slate-300">{JSON.stringify(res.raw_response, null, 2)}</pre>
+          </details>
+        </div>
+      )}
+
+      {raw && (
+        <details className="mt-3 text-xs" open>
+          <summary className="cursor-pointer text-slate-400">Mock DSP raw bid response (direct from /dsp/bid)</summary>
+          <pre className="mt-2 max-h-72 overflow-auto rounded-lg bg-slate-950 p-3 text-slate-300">{JSON.stringify(raw, null, 2)}</pre>
+        </details>
+      )}
+    </Card>
+  )
+}
+
+function Flag({ ok, label }) {
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2">
+      <span className={ok ? 'text-emerald-400' : 'text-slate-600'}>{ok ? '✓' : '○'}</span>
+      <span className="text-slate-300">{label}</span>
+    </div>
   )
 }
 

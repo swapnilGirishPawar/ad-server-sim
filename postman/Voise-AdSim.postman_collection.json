@@ -1,0 +1,373 @@
+{
+  "info": {
+    "_postman_id": "a1b2c3d4-e5f6-47a8-9b0c-voiseadsim0001",
+    "name": "Voise Ad Sim — E2E Flows",
+    "description": "Step-by-step tests for the Voise ad server, using the simulator and a mock ad buyer (DSP).\n\n**How to run:** open folders 0 → 5 in order and click Send on each request.\n\n**Before folder 3:** run folder 1 first — it saves a real ad tag ID into {{tag_id}}.\n\n**Tip:** keep the simulator backend terminal open during folder 3. You will see each auction request and whether the mock buyer bid.\n\n**Variables** (Collection → Variables tab):\n- sim_base = simulator (default http://localhost:8090)\n- adserver_base = Voise ad server (default http://localhost:8001)\n- tag_id = filled automatically by folder 1\n- publisher_id = 1192 (matches the team CTV sample)\n- request_id = set automatically before each auction request",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "0 - Check everything is running",
+      "description": "Quick checks that the simulator, ad server, and mock buyer are up before you run any tests.",
+      "item": [
+        {
+          "name": "Check simulator and ad server are up",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{sim_base}}/api/health", "host": ["{{sim_base}}"], "path": ["api", "health"] },
+            "description": "Checks that the simulator is running and can reach the Voise ad server.\n\n**What to expect:** HTTP 200 and `\"ad_server_reachable\": true`.\n\n**If it fails:** start the ad server on port 8001 (or update the `adserver_base` variable)."
+          }
+        },
+        {
+          "name": "See which ad server URLs the simulator found",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{sim_base}}/api/target", "host": ["{{sim_base}}"], "path": ["api", "target"] },
+            "description": "Shows the live API routes the simulator discovered on the ad server (VAST, OpenRTB, ads.txt, etc.).\n\n**What to expect:** HTTP 200 with a list of resolved endpoints.\n\n**When to use:** optional sanity check — useful if routes changed or ports differ."
+          }
+        },
+        {
+          "name": "See mock buyer (DSP) status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{sim_base}}/api/dsp", "host": ["{{sim_base}}"], "path": ["api", "dsp"] },
+            "description": "Shows how the mock ad buyer (DSP) is configured and how many bids it has placed.\n\n**What to expect:** HTTP 200 with `mode` (bid / no_bid), price settings, and request/bid counters.\n\n**When to use:** before and after folder 3 to confirm the buyer received auction traffic."
+          }
+        }
+      ]
+    },
+    {
+      "name": "1 - Set up test data",
+      "description": "Creates advertisers, campaigns, publishers, and registers the mock buyer on the ad server. Required before testing auctions in folder 3.",
+      "item": [
+        {
+          "name": "Create test advertisers and save ad tag ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('seed completed (HTTP 200)', function () { pm.expect(pm.response.code).to.eql(200); });",
+                  "var j = pm.response.json();",
+                  "if (j.ad_units && j.ad_units.length) {",
+                  "  pm.collectionVariables.set('tag_id', String(j.ad_units[0].tag_id));",
+                  "  console.log('Saved ad tag ID → {{tag_id}} = ' + j.ad_units[0].tag_id);",
+                  "} else {",
+                  "  console.log('WARNING: no ad units returned — folder 3 may fail.');",
+                  "}",
+                  "if (j.counts) console.log('Created:', JSON.stringify(j.counts));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"publishers\": 2,\n  \"campaigns\": 4,\n  \"demand_partners\": 1,\n  \"seed_fake_dsp\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{sim_base}}/api/seed", "host": ["{{sim_base}}"], "path": ["api", "seed"] },
+            "description": "Sets up a small test world: advertisers with budget, campaigns, publishers/ad units, and registers the simulator's mock buyer as a demand partner on the ad server.\n\n**What to expect:** HTTP 200. The test script saves the first ad unit's tag ID into `{{tag_id}}` — check the Postman Console for `Saved ad tag ID → ...`.\n\n**You must run this before folder 3.** Without a tag ID, auction requests will fail."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 - Test video ads (VAST)",
+      "description": "Sends many simple video ad requests through VAST and shows fill metrics.",
+      "item": [
+        {
+          "name": "Send 200 video ad requests",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"protocols\": [\"vast\"],\n  \"total_requests\": 200,\n  \"requests_per_second\": 30,\n  \"fire_quartiles\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{sim_base}}/api/run", "host": ["{{sim_base}}"], "path": ["api", "run"] },
+            "description": "Drives 200 VAST video ad requests at the ad server and fires impression + quartile tracking pixels.\n\n**What to expect:** HTTP 200 with a `run_id`. Traffic runs in the background — watch the simulator dashboard for progress.\n\n**Next step:** use the two requests below to see totals and fill breakdown."
+          }
+        },
+        {
+          "name": "See request totals",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{sim_base}}/api/metrics/overview", "host": ["{{sim_base}}"], "path": ["api", "metrics", "overview"] },
+            "description": "Shows high-level counts: requests sent, responses received, impressions, clicks, and fill rate.\n\n**What to expect:** HTTP 200 with numeric totals (may be low right after starting folder 2 — wait a few seconds and send again)."
+          }
+        },
+        {
+          "name": "See real ads vs placeholder ads",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{sim_base}}/api/metrics/fill", "host": ["{{sim_base}}"], "path": ["api", "metrics", "fill"] },
+            "description": "Breaks down responses into real campaign ads, default filler (\"Video Ad\"), no-fill, and errors.\n\n**What to expect:** HTTP 200 with counts per category.\n\n**Why it matters:** confirms the ad server is serving real creatives, not only placeholders."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3 - Test ad auction (OpenRTB)",
+      "description": "Sends a real CTV OpenRTB bid request (matching the team's sample) to the ad server, runs an auction, and proves the mock buyer controls the outcome.",
+      "item": [
+        {
+          "name": "Turn mock buyer ON (will place bids)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"mode\": \"bid\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{sim_base}}/api/dsp/config", "host": ["{{sim_base}}"], "path": ["api", "dsp", "config"] },
+            "description": "Tells the mock ad buyer (DSP) to participate in auctions and submit bids.\n\n**What to expect:** HTTP 200. The next auction request should return a winning ad.\n\n**Run this before:** \"Send ad auction request — expect an ad back\"."
+          }
+        },
+        {
+          "name": "Send ad auction request — expect an ad back",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const guid = pm.variables.replaceIn('{{$guid}}').replace(/-/g, '');",
+                  "pm.collectionVariables.set('request_id', guid.slice(0, 16));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var code = pm.response.code;",
+                  "if (code === 204) { console.log('204 — no ad returned (no-bid).'); pm.test('got a response', function(){ return true; }); return; }",
+                  "var j; try { j = pm.response.json(); } catch (e) { console.log('empty or non-JSON body'); return; }",
+                  "var hasBid = j.seatbid && j.seatbid.length && j.seatbid[0].bid && j.seatbid[0].bid.length;",
+                  "if (hasBid) {",
+                  "  var bid = j.seatbid[0].bid[0];",
+                  "  console.log('Ad returned — seat=' + j.seatbid[0].seat + '  price=' + bid.price + '  creative=' + bid.crid);",
+                  "  pm.test('HTTP 200 with a winning bid', function () { pm.expect(code).to.eql(200); });",
+                  "  pm.test('bid has seat, price > 0, and VAST creative', function () {",
+                  "    pm.expect(j.seatbid[0].seat, 'seat').to.be.a('string').and.not.empty;",
+                  "    pm.expect(bid.price, 'price').to.be.above(0);",
+                  "    pm.expect(bid.adm, 'adm').to.include('VAST');",
+                  "  });",
+                  "} else {",
+                  "  console.log('No ad returned. nbr=' + j.nbr);",
+                  "  pm.test('Expected an ad — is the mock buyer ON and seed done?', function () { pm.expect(hasBid).to.be.ok; });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{request_id}}\",\n  \"imp\": [\n    {\n      \"id\": \"1\",\n      \"video\": {\n        \"mimes\": [\"video/mp4\"],\n        \"minduration\": 3,\n        \"maxduration\": 300,\n        \"startdelay\": 0,\n        \"protocols\": [1, 2, 3, 4, 5, 6],\n        \"w\": 1920,\n        \"h\": 1080,\n        \"linearity\": 1,\n        \"sequence\": 1,\n        \"boxingallowed\": 1,\n        \"playbackmethod\": [1],\n        \"api\": [1, 2]\n      },\n      \"tagid\": \"{{tag_id}}\",\n      \"bidfloor\": 5.775,\n      \"bidfloorcur\": \"USD\",\n      \"clickbrowser\": 0,\n      \"secure\": 1\n    }\n  ],\n  \"app\": {\n    \"id\": \"9887674\",\n    \"name\": \"Philo: Shows, Movies, and Live TV\",\n    \"bundle\": \"G22223020133\",\n    \"storeurl\": \"https://samsung.com/us/appstore/app/G22223020133\",\n    \"cat\": [\"IAB4\", \"IAB5\", \"IAB2\", \"IAB3\", \"IAB1\"],\n    \"publisher\": { \"id\": \"{{publisher_id}}\" },\n    \"content\": {\n      \"genre\": \"Adventure\",\n      \"cat\": [\"IAB1-5\"],\n      \"videoquality\": 1,\n      \"context\": 1,\n      \"contentrating\": \"TV-MA\",\n      \"livestream\": 0,\n      \"len\": 1380,\n      \"language\": \"en\"\n    }\n  },\n  \"device\": {\n    \"geo\": {\n      \"lat\": 32.9074,\n      \"lon\": -97.4257,\n      \"type\": 2,\n      \"country\": \"USA\",\n      \"region\": \"TX\",\n      \"city\": \"Fort Worth\",\n      \"zip\": \"76179\"\n    },\n    \"dnt\": 0,\n    \"lmt\": 0,\n    \"ua\": \"Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) 76.0.3809.146/6.0 TV Safari/537.36\",\n    \"ip\": \"132.147.164.4\",\n    \"devicetype\": 3,\n    \"make\": \"Samsung\",\n    \"model\": \"UN70TU6985FXZA\",\n    \"os\": \"Tizen\",\n    \"osv\": \"6.0\",\n    \"js\": 1,\n    \"language\": \"en\",\n    \"carrier\": \"Nextlink Broadband\",\n    \"connectiontype\": 2,\n    \"ifa\": \"df8ee962-af95-4a77-b0ad-4bbb6ff86c0b\",\n    \"ext\": { \"ifa_type\": \"tifa\" }\n  },\n  \"user\": {},\n  \"at\": 1,\n  \"tmax\": 660,\n  \"cur\": [\"USD\"],\n  \"bcat\": [\"IAB26\"],\n  \"source\": {\n    \"fd\": 1,\n    \"tid\": \"85x1CF677D5AED84A08\",\n    \"ext\": {\n      \"schain\": {\n        \"complete\": 1,\n        \"nodes\": [\n          {\n            \"asi\": \"voisetech.com\",\n            \"sid\": \"{{publisher_id}}\",\n            \"rid\": \"{{request_id}}\",\n            \"hp\": 1\n          }\n        ],\n        \"ver\": \"1.0\"\n      }\n    }\n  },\n  \"regs\": {\n    \"coppa\": 0,\n    \"ext\": { \"us_privacy\": \"1YNN\" }\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{adserver_base}}/api/b/{{tag_id}}?pub={{publisher_id}}",
+              "host": ["{{adserver_base}}"],
+              "path": ["api", "b", "{{tag_id}}"],
+              "query": [{ "key": "pub", "value": "{{publisher_id}}" }]
+            },
+            "description": "Sends a CTV OpenRTB bid request to the Voise ad server — same shape as the team's inbound sample (Samsung Tizen TV, Philo app, 1920×1080 video, publisher 1192, supply chain, US privacy).\n\n**What happens:** the ad server runs an auction and calls the simulator's mock buyer. Watch the simulator terminal for `MOCK DSP` and `DECISION: BID`.\n\n**What to expect:** HTTP 200 with a winning bid (`seatbid`), a price above the floor (5.775), and a VAST creative in `adm`. The Console prints `Ad returned — seat=...`.\n\n**Important:**\n- Run folder 1 first so `{{tag_id}}` is set.\n- First call can take up to ~30 seconds (cold start). Set Postman timeout to 60000 ms (Settings → General).\n- `request_id` is generated automatically so `id` and `source.ext.schain.nodes[0].rid` always match."
+          }
+        },
+        {
+          "name": "Check mock buyer received the request",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{sim_base}}/api/dsp", "host": ["{{sim_base}}"], "path": ["api", "dsp"] },
+            "description": "Confirms the mock buyer was called during the last auction.\n\n**What to expect:** the `bids` counter increased and `last_response` shows the buyer's decision (BID).\n\n**When to use:** right after \"Send ad auction request — expect an ad back\"."
+          }
+        },
+        {
+          "name": "Turn mock buyer OFF (will not bid)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"mode\": \"no_bid\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{sim_base}}/api/dsp/config", "host": ["{{sim_base}}"], "path": ["api", "dsp", "config"] },
+            "description": "Tells the mock buyer to refuse all auctions (no-bid).\n\n**What to expect:** HTTP 200. The next identical auction request should return no ad.\n\n**Why:** proves the auction outcome really depends on the buyer, not a fixed response."
+          }
+        },
+        {
+          "name": "Send same auction request — expect no ad",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const guid = pm.variables.replaceIn('{{$guid}}').replace(/-/g, '');",
+                  "pm.collectionVariables.set('request_id', guid.slice(0, 16));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var code = pm.response.code;",
+                  "if (code === 204) { console.log('204 no-bid — correct (mock buyer is OFF).'); pm.test('no ad when buyer is OFF', function(){ return true; }); return; }",
+                  "var j; try { j = pm.response.json(); } catch (e) { console.log('empty body — also OK for no-bid'); return; }",
+                  "var hasBid = j.seatbid && j.seatbid.length && j.seatbid[0].bid && j.seatbid[0].bid.length;",
+                  "console.log(hasBid ? 'Unexpected ad returned!' : 'No ad (nbr=' + j.nbr + ') — correct.');",
+                  "pm.test('no winning bid when mock buyer is OFF', function () { pm.expect(!!hasBid).to.eql(false); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{request_id}}\",\n  \"imp\": [\n    {\n      \"id\": \"1\",\n      \"video\": {\n        \"mimes\": [\"video/mp4\"],\n        \"minduration\": 3,\n        \"maxduration\": 300,\n        \"startdelay\": 0,\n        \"protocols\": [1, 2, 3, 4, 5, 6],\n        \"w\": 1920,\n        \"h\": 1080,\n        \"linearity\": 1,\n        \"sequence\": 1,\n        \"boxingallowed\": 1,\n        \"playbackmethod\": [1],\n        \"api\": [1, 2]\n      },\n      \"tagid\": \"{{tag_id}}\",\n      \"bidfloor\": 5.775,\n      \"bidfloorcur\": \"USD\",\n      \"clickbrowser\": 0,\n      \"secure\": 1\n    }\n  ],\n  \"app\": {\n    \"id\": \"9887674\",\n    \"name\": \"Philo: Shows, Movies, and Live TV\",\n    \"bundle\": \"G22223020133\",\n    \"storeurl\": \"https://samsung.com/us/appstore/app/G22223020133\",\n    \"cat\": [\"IAB4\", \"IAB5\", \"IAB2\", \"IAB3\", \"IAB1\"],\n    \"publisher\": { \"id\": \"{{publisher_id}}\" },\n    \"content\": {\n      \"genre\": \"Adventure\",\n      \"cat\": [\"IAB1-5\"],\n      \"videoquality\": 1,\n      \"context\": 1,\n      \"contentrating\": \"TV-MA\",\n      \"livestream\": 0,\n      \"len\": 1380,\n      \"language\": \"en\"\n    }\n  },\n  \"device\": {\n    \"geo\": {\n      \"lat\": 32.9074,\n      \"lon\": -97.4257,\n      \"type\": 2,\n      \"country\": \"USA\",\n      \"region\": \"TX\",\n      \"city\": \"Fort Worth\",\n      \"zip\": \"76179\"\n    },\n    \"dnt\": 0,\n    \"lmt\": 0,\n    \"ua\": \"Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) 76.0.3809.146/6.0 TV Safari/537.36\",\n    \"ip\": \"132.147.164.4\",\n    \"devicetype\": 3,\n    \"make\": \"Samsung\",\n    \"model\": \"UN70TU6985FXZA\",\n    \"os\": \"Tizen\",\n    \"osv\": \"6.0\",\n    \"js\": 1,\n    \"language\": \"en\",\n    \"carrier\": \"Nextlink Broadband\",\n    \"connectiontype\": 2,\n    \"ifa\": \"df8ee962-af95-4a77-b0ad-4bbb6ff86c0b\",\n    \"ext\": { \"ifa_type\": \"tifa\" }\n  },\n  \"user\": {},\n  \"at\": 1,\n  \"tmax\": 660,\n  \"cur\": [\"USD\"],\n  \"bcat\": [\"IAB26\"],\n  \"source\": {\n    \"fd\": 1,\n    \"tid\": \"85x1CF677D5AED84A08\",\n    \"ext\": {\n      \"schain\": {\n        \"complete\": 1,\n        \"nodes\": [\n          {\n            \"asi\": \"voisetech.com\",\n            \"sid\": \"{{publisher_id}}\",\n            \"rid\": \"{{request_id}}\",\n            \"hp\": 1\n          }\n        ],\n        \"ver\": \"1.0\"\n      }\n    }\n  },\n  \"regs\": {\n    \"coppa\": 0,\n    \"ext\": { \"us_privacy\": \"1YNN\" }\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{adserver_base}}/api/b/{{tag_id}}?pub={{publisher_id}}",
+              "host": ["{{adserver_base}}"],
+              "path": ["api", "b", "{{tag_id}}"],
+              "query": [{ "key": "pub", "value": "{{publisher_id}}" }]
+            },
+            "description": "Sends the same CTV OpenRTB request as the previous step, but the mock buyer is now set to no-bid.\n\n**What to expect:** HTTP 204 or a response with no winning bid. The simulator terminal should show `DECISION: NO-BID`.\n\n**Why:** confirms the ad server auction actually calls the buyer and respects a no-bid."
+          }
+        },
+        {
+          "name": "Turn mock buyer back ON",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"mode\": \"bid\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{sim_base}}/api/dsp/config", "host": ["{{sim_base}}"], "path": ["api", "dsp", "config"] },
+            "description": "Restores the mock buyer to normal bidding mode after the no-bid test.\n\n**What to expect:** HTTP 200 with `mode: bid`."
+          }
+        },
+        {
+          "name": "Optional — test mock buyer directly (skip ad server)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"direct-test-1\",\n  \"imp\": [\n    {\n      \"id\": \"1\",\n      \"bidfloor\": 2.5,\n      \"video\": { \"w\": 640, \"h\": 480 }\n    }\n  ],\n  \"site\": { \"id\": \"s\" },\n  \"device\": { \"devicetype\": 2 }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{sim_base}}/dsp/bid", "host": ["{{sim_base}}"], "path": ["dsp", "bid"] },
+            "description": "Optional. Sends a small test bid request straight to the mock buyer, without going through the ad server.\n\n**What to expect:** HTTP 200 with a bid response, or 204 if the buyer is in no-bid mode.\n\n**When to use:** debugging the buyer alone — not part of the normal end-to-end flow."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4 - Run automated checks",
+      "description": "Runs built-in conformance scenarios (S1–S15) against IAB standards.",
+      "item": [
+        {
+          "name": "Run all 15 automated compliance checks",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"scenario\": \"all\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{sim_base}}/api/scenario", "host": ["{{sim_base}}"], "path": ["api", "scenario"] },
+            "description": "Runs all 15 conformance scenarios in the background (VAST, OpenRTB, privacy, supply chain, etc.).\n\n**What to expect:** HTTP 200 immediately; scenarios finish in 1–2 minutes.\n\n**Next step:** open folder 5 for scorecard and findings."
+          }
+        },
+        {
+          "name": "Run one check only (change scenario ID)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"scenario\": \"S10\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{sim_base}}/api/scenario", "host": ["{{sim_base}}"], "path": ["api", "scenario"] },
+            "description": "Runs a single scenario instead of all 15.\n\n**Default:** S10 (OpenRTB conformance). Change `\"S10\"` to S1–S15, or A/B/C/D for grouped runs.\n\n**What to expect:** HTTP 200; result appears in folder 5 or the dashboard."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5 - View results",
+      "description": "Read scores, findings, and downloadable reports after running traffic or scenarios.",
+      "item": [
+        {
+          "name": "See pass/fail grades by standard",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{sim_base}}/api/metrics/scorecard", "host": ["{{sim_base}}"], "path": ["api", "metrics", "scorecard"] },
+            "description": "Shows a grade per IAB standard: VAST, VMAP, OpenRTB, ads.txt, supply chain, etc.\n\n**What to expect:** PASS, FAIL, WARN, or GAP per area."
+          }
+        },
+        {
+          "name": "See detailed issues found",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{sim_base}}/api/metrics/findings", "host": ["{{sim_base}}"], "path": ["api", "metrics", "findings"] },
+            "description": "Lists every conformance finding with the spec section, expected value, and what was observed.\n\n**What to expect:** HTTP 200 with an array of findings (may be empty if nothing failed)."
+          }
+        },
+        {
+          "name": "Compare simulator counts vs ad server",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{sim_base}}/api/metrics/reconcile", "host": ["{{sim_base}}"], "path": ["api", "metrics", "reconcile"] },
+            "description": "Compares what the simulator sent (impressions, clicks) with what the ad server reported, per campaign.\n\n**What to expect:** counts within tolerance = PASS; large drift = investigate tracking or reporting."
+          }
+        },
+        {
+          "name": "Check ads.txt and sellers.json files",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{sim_base}}/api/supply-chain", "host": ["{{sim_base}}"], "path": ["api", "supply-chain"] },
+            "description": "Fetches and validates the ad server's ads.txt, app-ads.txt, and sellers.json.\n\n**What to expect:** HTTP 200 with parse results and any supply-chain findings."
+          }
+        },
+        {
+          "name": "Download human-readable report",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{sim_base}}/api/report/markdown", "host": ["{{sim_base}}"], "path": ["api", "report", "markdown"] },
+            "description": "Returns the GAP report as markdown — suitable for sharing with the ad-server team.\n\n**Also saved to:** `backend/reports/GAP_REPORT.md` on the simulator machine."
+          }
+        },
+        {
+          "name": "Download machine-readable report",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{sim_base}}/api/report/gaps.json", "host": ["{{sim_base}}"], "path": ["api", "report", "gaps.json"] },
+            "description": "Returns the same report as JSON (findings, scorecard, scenario verdicts) for scripts or CI.\n\n**What to expect:** HTTP 200 with structured JSON."
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    { "key": "sim_base", "value": "http://localhost:8090", "type": "string" },
+    { "key": "adserver_base", "value": "http://localhost:8001", "type": "string" },
+    { "key": "tag_id", "value": "", "type": "string" },
+    { "key": "publisher_id", "value": "1192", "type": "string" },
+    { "key": "request_id", "value": "", "type": "string" }
+  ]
+}

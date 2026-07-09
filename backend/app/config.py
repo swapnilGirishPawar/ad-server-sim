@@ -81,8 +81,8 @@ class Settings(BaseSettings):
     sim_db_path: str = "./sim.db"
 
     # --- Random traffic dimension pools ----------------------------------
-    countries: str = "IN,US,UK,CA"
-    devices: str = "mobile,desktop,tablet"
+    countries: str = "US,IN,UK,CA"
+    devices: str = "ctv,mobile,desktop,tablet"
     browsers: str = "chrome,firefox,safari,edge"
 
     # ---------------------------------------------------------------------
@@ -96,7 +96,7 @@ class Settings(BaseSettings):
 
     @property
     def device_list(self) -> List[str]:
-        return _csv(self.devices) or ["mobile", "desktop", "tablet"]
+        return _csv(self.devices) or ["ctv", "mobile", "desktop", "tablet"]
 
     @property
     def browser_list(self) -> List[str]:
