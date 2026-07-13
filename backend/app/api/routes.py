@@ -385,7 +385,8 @@ async def publisher_request(request: Request, req: PublisherAdRequest):
                 "campaign": res.campaign, "creative_id": res.creative_id,
                 "no_fill_reason": res.no_fill_reason, "trace_id": res.trace_id,
                 "conformant": fail_count == 0, "fail_count": fail_count,
-                "findings": res.findings, "raw": res.raw}
+                "findings": res.findings, "raw": res.raw,
+                "adm": res.adm, "win_urls": res.win_urls}
 
     t0 = _time.perf_counter()
     full: List[Dict[str, Any]] = list(await asyncio.gather(*[one(i) for i in range(req.count)]))
@@ -429,8 +430,48 @@ async def publisher_request(request: Request, req: PublisherAdRequest):
         "price": rep["price"], "trace_id": rep["trace_id"],
         "findings": rep["findings"], "raw": rep["raw"],
     }
+
+    # Full winning creative (untruncated) so it can be pasted into a VAST viewer,
+    # plus optional server-side playback that fires the ad's trackers + win notices.
+    win_row = next((r for r in full if r["filled"] and r.get("adm")), None)
+    winning_vast = win_row.get("adm") if win_row else None
+    playback = None
+    if req.simulate_playback and win_row:
+        from app.adserver import vast as vast_mod
+        parsed_vast = vast_mod.parse_vast(win_row.get("adm") or "")
+        targets: List[tuple] = []
+        for u in parsed_vast.get("impression_urls", []):
+            targets.append(("impression", u))
+        for u in parsed_vast.get("tracking_event_urls", []):
+            targets.append(("quartile", u))
+        for u in (win_row.get("win_urls") or []):
+            targets.append(("win/billing", u))
+        fired: List[Dict[str, Any]] = []
+        seen: set = set()
+        for ev, u in targets:
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            is_dsp = "/dsp/track" in u          # DSP pixels fire as-is; ad-server pixels get host/prefix-normalized
+            fire_url = u
+            if is_dsp and ("localhost" in u or "host.docker.internal" in u):
+                # The ad server https-upgrades the creative markup (secure inventory),
+                # but the LOCAL fake DSP serves plain http — downgrade so the pixel lands.
+                fire_url = fire_url.replace("https://", "http://")
+            res_fire = await client.fire(fire_url, normalize=not is_dsp)
+            fired.append({"event": ev, "url": res_fire["url"][:220],
+                          "status_code": res_fire["status_code"], "ok": bool(res_fire["ok"])})
+        playback = {
+            "fired": fired,
+            "ok": sum(1 for f in fired if f["ok"]),
+            "total": len(fired),
+            "ad_server_hits": sum(1 for f in fired if f["ok"] and "/api/track/" in f["url"]),
+            "advertiser_hits": sum(1 for f in fired if f["ok"] and "/dsp/track" in f["url"]),
+        }
+
     return {"protocol": protocol, "endpoint": sample["url"], "count": req.count, "preview": False,
             "sample_request": sample, "sample_response": sample_response,
+            "winning_vast": winning_vast, "playback": playback,
             "results": results, "summary": summary}
 
 

@@ -455,6 +455,7 @@ class AdServerClient:
             price=parsed["price"], win_urls=win_urls,
             findings=[f.to_dict() for f in vresult.findings],
             no_fill_reason=parsed["no_fill_reason"], trace_id=req_id,
+            adm=parsed.get("adm"),
             raw=(r.text[:2000] if r.content else ""),
         )
 

@@ -113,6 +113,10 @@ class PublisherAdRequest(BaseModel):
     randomize_id: bool = True  # give each fired request a fresh id (custom_request path)
     # Build the request(s) and return them WITHOUT sending — for inspection/learning.
     preview_only: bool = False
+    # After a win, simulate the ad being played: fire the winning VAST's
+    # impression/quartile pixels + the win notices (nurl/burl) server-side, so the
+    # ad server records the paid impression and the fake DSP records its trackers.
+    simulate_playback: bool = False
 
 
 class DspConfig(BaseModel):

@@ -3,6 +3,7 @@ import { api, openWS } from './api.js'
 import { Card, Stat, Button, Field, Input, Select, Badge, cls } from './ui.jsx'
 import { Overview, Auctions, CampaignTable, Charts, Scenarios, Scorecard, FillBreakdown, Latency, Findings, FlowB } from './panels.jsx'
 import PublisherRequest from './publisher.jsx'
+import DspSettings from './dsp_settings.jsx'
 
 const SCENARIO_OPTIONS = [
   ['all', 'All (S1–S15)'], ['S1', 'S1 · Smoke'], ['S2', 'S2 · Normal traffic'],
@@ -92,7 +93,7 @@ export default function App() {
           </div>
         </div>
         <nav className="mt-2 flex gap-1">
-          {[['dashboard', 'Dashboard'], ['publisher', 'Publisher Ad Request']].map(([v, label]) => (
+          {[['dashboard', 'Dashboard'], ['publisher', 'Publisher Ad Request'], ['dsp', 'DSP Settings']].map(([v, label]) => (
             <button key={v} onClick={() => setView(v)}
               className={cls('rounded-md px-3 py-1 text-sm font-medium transition',
                 view === v ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200')}>
@@ -103,7 +104,7 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-7xl space-y-4 p-6">
-        {view === 'publisher' ? <PublisherRequest /> : (
+        {view === 'publisher' ? <PublisherRequest /> : view === 'dsp' ? <DspSettings /> : (
         <>
         {err && <div className="rounded-lg border border-rose-800 bg-rose-950/40 px-3 py-2 text-sm text-rose-300">{String(err)}</div>}
 

@@ -33,4 +33,5 @@ class AdResult:
     findings: List[Dict[str, Any]] = field(default_factory=list)  # conformance findings (dicts)
     no_fill_reason: Optional[str] = None
     trace_id: Optional[str] = None
+    adm: Optional[str] = None            # full winning creative markup (ORTB bid.adm / VAST)
     raw: str = ""

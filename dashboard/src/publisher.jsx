@@ -69,6 +69,7 @@ export default function PublisherRequest() {
   const [useCustom, setUseCustom] = useState(false)
   const [customJson, setCustomJson] = useState(SAMPLE_ORTB)
   const [randomizeId, setRandomizeId] = useState(true)
+  const [simPlayback, setSimPlayback] = useState(false)
   const [advanced, setAdvanced] = useState(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState(null)
@@ -76,6 +77,7 @@ export default function PublisherRequest() {
   const [result, setResult] = useState(null)
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }))
+  const copy = (t) => { try { navigator.clipboard.writeText(t) } catch { /* clipboard blocked */ } }
   const isOrtb = form.protocol === 'ortb'
 
   function buildBody(previewOnly) {
@@ -86,6 +88,7 @@ export default function PublisherRequest() {
       device: form.device, country: form.country,
       width: Number(form.width) || 1920, height: Number(form.height) || 1080,
       bidfloor: Number(form.bidfloor) || 0, preview_only: !!previewOnly,
+      simulate_playback: !previewOnly && simPlayback,
     }
     if (form.us_privacy) b.us_privacy = form.us_privacy
     if (form.gdpr !== '') b.gdpr = Number(form.gdpr)
@@ -203,11 +206,13 @@ export default function PublisherRequest() {
           </div>
         )}
 
-        <div className="mt-3 flex flex-wrap items-center gap-2">
+        <div className="mt-3 flex flex-wrap items-center gap-3">
           <Button onClick={doSend} disabled={busy}>{busy ? 'Sending…' : `Send ${form.count} request${Number(form.count) === 1 ? '' : 's'}`}</Button>
           <Button variant="ghost" onClick={doPreview} disabled={busy}>Preview request</Button>
-          <span className="text-xs text-slate-500">Requests go via the simulator backend to avoid CORS. First OpenRTB call can be slow (ad-server cold start).</span>
+          <Checkbox checked={simPlayback} onChange={(e) => setSimPlayback(e.target.checked)}
+            label="Simulate playback (fire the winning ad's trackers after the win)" />
         </div>
+        <p className="mt-1 text-xs text-slate-500">Requests go via the simulator backend to avoid CORS. First OpenRTB call can be slow (ad-server cold start). Playback fires the impression/quartile pixels + win notice server-side, so the ad server records the paid impression.</p>
       </Card>
 
       {preview && (
@@ -251,6 +256,42 @@ export default function PublisherRequest() {
                 </ul>
               )}
               <pre className="max-h-80 overflow-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-300">{result.sample_response.raw || '(empty body)'}</pre>
+            </Card>
+          )}
+
+          {result.winning_vast && (
+            <Card title="Winning ad creative (VAST)" right={<Button variant="ghost" onClick={() => copy(result.winning_vast)}>Copy VAST</Button>}>
+              <p className="mb-2 text-xs text-slate-500">
+                The exact VAST the ad server returned (with its tracking pixel injected). The video is a public MP4, so
+                it plays in any VAST viewer — copy this and paste it into a VAST inspector to watch the ad.
+              </p>
+              <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-slate-950 p-3 text-xs text-slate-300">{result.winning_vast}</pre>
+            </Card>
+          )}
+
+          {result.playback && (
+            <Card title="Playback — trackers fired server-side">
+              <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-4">
+                <Stat label="Pixels fired OK" value={`${result.playback.ok}/${result.playback.total}`} tone={result.playback.ok === result.playback.total ? 'good' : 'warn'} />
+                <Stat label="Ad server hits" value={result.playback.ad_server_hits} tone="good" sub="paid impression + win" />
+                <Stat label="Advertiser hits" value={result.playback.advertiser_hits} tone="good" sub="fake DSP /dsp/track" />
+              </div>
+              <div className="max-h-60 overflow-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="text-xs uppercase text-slate-500">
+                    <tr className="border-b border-slate-800"><th className="py-2 pr-3">Event</th><th className="py-2 pr-3">Result</th><th className="py-2">URL</th></tr>
+                  </thead>
+                  <tbody className="text-slate-200">
+                    {result.playback.fired.map((f, i) => (
+                      <tr key={i} className="border-b border-slate-800/50 align-top">
+                        <td className="py-1.5 pr-3 whitespace-nowrap">{f.event}</td>
+                        <td className="py-1.5 pr-3 whitespace-nowrap">{f.ok ? <span className="text-emerald-400">✓ {f.status_code}</span> : <span className="text-rose-300">✗ {f.status_code}</span>}</td>
+                        <td className="py-1.5 break-all text-slate-500">{f.url}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </Card>
           )}
 

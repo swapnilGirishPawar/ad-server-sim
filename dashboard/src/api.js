@@ -39,6 +39,20 @@ export const api = {
   publisherRequest: (b) => j('POST', '/publisher-request', b),
 }
 
+// Raw mock-DSP control (endpoints live at /dsp/*, NOT under /api — same origin).
+export async function dspSetConfig(patch) {
+  const res = await fetch('/dsp/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
+  })
+  const text = await res.text()
+  if (!res.ok) throw new Error(`${res.status}: ${text}`)
+  return text ? JSON.parse(text) : null
+}
+export async function dspReset() {
+  const res = await fetch('/dsp/reset', { method: 'POST' })
+  return res.ok ? res.json() : null
+}
+
 // The mock DSP lives at /dsp/bid (NOT under /api) — same origin, so the browser
 // can call it directly to show the DSP's own raw bid response.
 export async function dspBidRaw() {
