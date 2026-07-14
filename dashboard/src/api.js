@@ -39,23 +39,36 @@ export const api = {
   publisherRequest: (b) => j('POST', '/publisher-request', b),
 }
 
-// Raw mock-DSP control (endpoints live at /dsp/*, NOT under /api — same origin).
-export async function dspSetConfig(patch) {
-  const res = await fetch('/dsp/config', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
+// Raw mock-DSP control (endpoints live at /dsps/*, NOT under /api — same origin).
+// Every DSP — including the original default one, id 'dsp-1' — is reachable
+// uniformly at /dsps/{dspId}/... . `dspId` defaults to 'dsp-1' so existing
+// no-arg call sites (e.g. panels.jsx's Flow B) keep working unchanged.
+async function raw(method, path, body) {
+  const res = await fetch(path, {
+    method, headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
   })
   const text = await res.text()
   if (!res.ok) throw new Error(`${res.status}: ${text}`)
   return text ? JSON.parse(text) : null
 }
-export async function dspReset() {
-  const res = await fetch('/dsp/reset', { method: 'POST' })
+
+export const dspList = () => raw('GET', '/dsps/')
+export const dspCreate = (body) => raw('POST', '/dsps/', body || {})
+export const dspDelete = (dspId) => raw('DELETE', `/dsps/${encodeURIComponent(dspId)}`)
+export const dspGetConfig = (dspId = 'dsp-1') => raw('GET', `/dsps/${encodeURIComponent(dspId)}/config`)
+
+export async function dspSetConfig(patch, dspId = 'dsp-1') {
+  return raw('POST', `/dsps/${encodeURIComponent(dspId)}/config`, patch)
+}
+export async function dspReset(dspId = 'dsp-1') {
+  const res = await fetch(`/dsps/${encodeURIComponent(dspId)}/reset`, { method: 'POST' })
   return res.ok ? res.json() : null
 }
 
-// The mock DSP lives at /dsp/bid (NOT under /api) — same origin, so the browser
-// can call it directly to show the DSP's own raw bid response.
-export async function dspBidRaw() {
+// The mock DSP lives at /dsps/{dspId}/bid (NOT under /api) — same origin, so
+// the browser can call it directly to show that DSP's own raw bid response.
+export async function dspBidRaw(dspId = 'dsp-1') {
   const sample = {
     id: 'dashboard-raw-1',
     at: 1,
@@ -134,7 +147,7 @@ export async function dspBidRaw() {
     },
     regs: { coppa: 0, ext: { us_privacy: '1YNN' } },
   }
-  const res = await fetch('/dsp/bid', {
+  const res = await fetch(`/dsps/${encodeURIComponent(dspId)}/bid`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sample),
   })
   if (res.status === 204) return { _note: 'HTTP 204 — DSP no-bid (no body)' }

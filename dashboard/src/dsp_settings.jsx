@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { Card, Stat, Button, Field, Input, Select, Badge, cls } from './ui.jsx'
-import { api, dspSetConfig, dspReset, dspBidRaw } from './api.js'
+import { dspList, dspCreate, dspDelete, dspSetConfig, dspReset, dspBidRaw } from './api.js'
 
 // OpenRTB No-Bid Reason codes (2.6 §5.24 / List 5.24) — shown when mode = no_bid.
 const NBR_CODES = [
@@ -48,9 +48,50 @@ const MODES = [
   ['bid', 'Bid', 'PASS'], ['no_bid', 'No-bid', 'WARN'],
   ['timeout', 'Timeout', 'BLOCKED'], ['error', 'Error', 'FAIL'],
 ]
+const modeTone = (m) => (MODES.find((x) => x[0] === m) || [])[2] || 'ERROR'
+
+// Tabs for switching between the registered mock DSPs, plus "+ Add DSP".
+function DspTabs({ dsps, activeId, onSelect, onAdd, onRemove, busy }) {
+  const [adding, setAdding] = useState(false)
+  const [name, setName] = useState('')
+
+  const submit = () => { onAdd(name.trim()); setName(''); setAdding(false) }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {dsps.map((d) => (
+        <button key={d.id} onClick={() => onSelect(d.id)}
+          className={cls('flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm font-medium transition',
+            d.id === activeId ? 'border-indigo-500 bg-indigo-600 text-white'
+              : 'border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800')}>
+          {d.name}
+          <Badge verdict={modeTone(d.config?.mode)}>{d.config?.mode}</Badge>
+          <span className="text-xs opacity-70">{d.stats?.bids ?? 0} bids</span>
+        </button>
+      ))}
+      {!adding && (
+        <Button variant="ghost" onClick={() => setAdding(true)} disabled={busy}>+ Add DSP</Button>
+      )}
+      {adding && (
+        <div className="flex items-center gap-1">
+          <Input autoFocus placeholder="DSP name (optional)" value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') setAdding(false) }} />
+          <Button onClick={submit} disabled={busy}>Create</Button>
+          <Button variant="ghost" onClick={() => setAdding(false)}>Cancel</Button>
+        </div>
+      )}
+      {activeId !== 'dsp-1' && (
+        <Button variant="danger" onClick={onRemove} disabled={busy}>Remove {dsps.find((d) => d.id === activeId)?.name}</Button>
+      )}
+    </div>
+  )
+}
 
 export default function DspSettings() {
-  const [cfg, setCfg] = useState(null)          // editable mirror of the DSP config
+  const [dsps, setDsps] = useState([])           // all registered mock DSPs (summaries)
+  const [activeId, setActiveId] = useState('dsp-1')
+  const [cfg, setCfg] = useState(null)          // editable mirror of the active DSP's config
   const [stats, setStats] = useState(null)
   const [endpoint, setEndpoint] = useState('')
   const [useCustom, setUseCustom] = useState(false)
@@ -62,18 +103,38 @@ export default function DspSettings() {
 
   const set = (k, v) => setCfg((c) => ({ ...c, [k]: v }))
 
-  const load = useCallback(async () => {
+  const applyEntry = (entry) => {
+    setActiveId(entry.id)
+    setCfg(entry.config); setStats(entry.stats); setEndpoint(entry.endpoint_url || '')
+    if (entry.config && entry.config.custom_response) {
+      setUseCustom(true); setCustomText(JSON.stringify(entry.config.custom_response, null, 2))
+    } else {
+      setUseCustom(false)
+    }
+    setTestResp(null)
+  }
+
+  // Reload the full DSP list and (re)select a DSP by id — preferId, else the
+  // currently active one if it still exists, else the first registered DSP.
+  const load = useCallback(async (preferId) => {
     setErr(null)
     try {
-      const d = await api.dsp()
-      setCfg(d.config); setStats(d.stats); setEndpoint(d.endpoint_url || '')
-      if (d.config && d.config.custom_response) {
-        setUseCustom(true); setCustomText(JSON.stringify(d.config.custom_response, null, 2))
-      }
+      const list = await dspList()
+      setDsps(list)
+      const wantId = preferId || activeId
+      const entry = list.find((d) => d.id === wantId) || list[0]
+      if (entry) applyEntry(entry)
     } catch (e) { setErr(String(e.message || e)) }
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load() }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const selectDsp = (id) => {
+    const entry = dsps.find((d) => d.id === id)
+    if (entry) applyEntry(entry)
+    else load(id)
+  }
 
   function buildPatch() {
     const c = cfg
@@ -105,19 +166,34 @@ export default function DspSettings() {
 
   const saveAll = async () => {
     setErr(null); setBusy(true)
-    try { const c = await dspSetConfig(buildPatch()); setCfg(c); flash('Settings saved ✓') }
+    try { await dspSetConfig(buildPatch(), activeId); await load(activeId); flash('Settings saved ✓') }
     catch (e) { setErr(String(e.message || e)) } finally { setBusy(false) }
   }
   // Mode buttons apply instantly (the common demo toggle).
   const applyMode = async (m) => {
     setErr(null); set('mode', m)
-    try { await dspSetConfig({ mode: m }); flash(`Mode → ${m}`); load() }
+    try { await dspSetConfig({ mode: m }, activeId); flash(`Mode → ${m}`); await load(activeId) }
     catch (e) { setErr(String(e.message || e)) }
   }
-  const doReset = async () => { setErr(null); try { setStats(await dspReset()); setTestResp(null); flash('Stats reset') } catch (e) { setErr(String(e.message || e)) } }
+  const doReset = async () => {
+    setErr(null)
+    try { setStats(await dspReset(activeId)); setTestResp(null); flash('Stats reset'); load(activeId) }
+    catch (e) { setErr(String(e.message || e)) }
+  }
   const doTest = async () => {
     setErr(null); setBusy(true)
-    try { setTestResp(await dspBidRaw()); load() }
+    try { setTestResp(await dspBidRaw(activeId)); await load(activeId) }
+    catch (e) { setErr(String(e.message || e)) } finally { setBusy(false) }
+  }
+  const doAdd = async (name) => {
+    setErr(null); setBusy(true)
+    try { const entry = await dspCreate({ name: name || undefined }); await load(entry.id); flash(`${entry.name} added ✓`) }
+    catch (e) { setErr(String(e.message || e)) } finally { setBusy(false) }
+  }
+  const doRemove = async () => {
+    if (activeId === 'dsp-1') return
+    setErr(null); setBusy(true)
+    try { await dspDelete(activeId); await load() }
     catch (e) { setErr(String(e.message || e)) } finally { setBusy(false) }
   }
 
@@ -129,10 +205,21 @@ export default function DspSettings() {
     <div className="space-y-4">
       {err && <div className="rounded-lg border border-rose-800 bg-rose-950/40 px-3 py-2 text-sm text-rose-300">{err}</div>}
 
-      <Card title="Fake DSP (the pretend buyer)"
+      <Card title="Fake DSPs (the pretend buyers)">
+        <p className="text-sm text-slate-400">
+          Configure one or more mock demand partners so your ad server's auction has multiple bidders to
+          compete against. Add a DSP here, copy its endpoint, and register it as a new demand partner on the
+          real ad server — then a single publisher request can be won by any of them.
+        </p>
+        <div className="mt-3">
+          <DspTabs dsps={dsps} activeId={activeId} onSelect={selectDsp} onAdd={doAdd} onRemove={doRemove} busy={busy} />
+        </div>
+      </Card>
+
+      <Card title={`${dsps.find((d) => d.id === activeId)?.name || 'DSP'} — behaviour`}
         right={saved && <span className="text-xs text-emerald-400">{saved}</span>}>
         <p className="text-sm text-slate-400">
-          Control how the mock demand partner responds when your ad server asks it to bid. Changes here
+          Control how this mock demand partner responds when your ad server asks it to bid. Changes here
           take effect on the <b>next</b> request — no restart. Endpoint: <code className="text-indigo-300">{endpoint}</code>
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -145,13 +232,13 @@ export default function DspSettings() {
               {label}
             </button>
           ))}
-          <span className="ml-auto"><Badge verdict={(MODES.find((x) => x[0] === cfg.mode) || [])[2] || 'ERROR'}>{cfg.mode}</Badge></span>
+          <span className="ml-auto"><Badge verdict={modeTone(cfg.mode)}>{cfg.mode}</Badge></span>
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
           <Button onClick={saveAll} disabled={busy}>{busy ? 'Saving…' : 'Save settings'}</Button>
           <Button variant="ghost" onClick={doTest} disabled={busy}>Send test bid</Button>
           <Button variant="ghost" onClick={doReset} disabled={busy}>Reset stats</Button>
-          <Button variant="ghost" onClick={load} disabled={busy}>Refresh</Button>
+          <Button variant="ghost" onClick={() => load(activeId)} disabled={busy}>Refresh</Button>
         </div>
       </Card>
 

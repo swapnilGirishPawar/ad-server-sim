@@ -6,6 +6,12 @@
       "runtimeExecutable": "backend/.venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "uvicorn", "--app-dir", "backend", "app.main:app", "--port", "8090"],
       "port": 8090
+    },
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "dashboard"],
+      "port": 5173
     }
   ]
 }

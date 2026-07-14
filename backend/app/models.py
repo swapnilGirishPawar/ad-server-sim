@@ -140,3 +140,9 @@ class DspConfig(BaseModel):
 
     def patch(self) -> Dict[str, Any]:
         return {k: v for k, v in self.model_dump().items() if v is not None}
+
+
+class DspCreate(BaseModel):
+    """Register a new independently-configurable mock DSP (POST /dsps)."""
+    name: Optional[str] = Field(default=None, description="Display name, e.g. 'DSP B'")
+    dsp_id: Optional[str] = Field(default=None, description="Optional explicit id/slug; auto-derived from name if omitted")

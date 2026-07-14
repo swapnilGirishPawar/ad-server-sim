@@ -31,6 +31,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Request, Response
 
+from app.dsp import registry
+
 logger = logging.getLogger("adsim.dsp")
 
 # OpenRTB No-Bid Reason Codes (§5.24 / OpenRTB 2.5 List 5.24 values 0..10).
@@ -46,62 +48,12 @@ _MTYPE = {"banner": 1, "video": 2, "audio": 3, "native": 4}
 _VIDEO_PROTOCOL = 7
 
 # Runtime-controllable behaviour (patched via POST /api/dsp/config or /dsp/config).
-CONFIG: Dict[str, Any] = {
-    "mode": "bid",            # bid | no_bid | timeout | error
-    "price": 6.50,            # base CPM the DSP is willing to pay
-    "bid_rate": 1.0,          # probability of bidding when eligible (win-rate sim)
-    "timeout_ms": 2000,       # delay before responding when mode="timeout"
-    "seat": "voise-fake-dsp",
-    "adomain": ["fakedsp-advertiser.com"],
-    "crid": "fake-dsp-creative-1",
-    "cat": ["IAB1"],
-    # --- valuation / floor handling ---
-    "currency": "USD",
-    "bid_margin": 1.20,       # bid at least floor * margin (so we clear the floor)
-    "max_cpm": 25.0,          # valuation ceiling
-    "jitter": 0.10,           # +/- price randomisation to look realistic
-    "respect_floor": True,    # if our valuation < bidfloor -> no-bid on that imp
-    "emit_nbr": True,         # no-bid as 200 {nbr} (True) or bare 204 (False)
-    "verbose": True,          # log every request + response to the terminal
-    # --- creative / tracking (a REAL, watchable ad) ---
-    # A public sample MP4 so the ad actually plays in any VAST viewer. Small
-    # 15s/868KB sample clip (lighter than the old ones for faster load in tests).
-    # Override at runtime via POST /dsp/config if you prefer another.
-    "video_url": "https://samplefile.com/samples/download/video/mp4/mp4_15s_sample_file_868KB.mp4",
-    "video_w": 640,
-    "video_h": 360,
-    "video_bitrate": 463,
-    "video_duration": "00:00:15",
-    "advertiser_name": "Voise Fake Advertiser",
-    "landing_url": "https://voisetech.com/",
-    # Base URL where THIS mock DSP is reachable, used to build Impression/tracking
-    # pixels that can actually be recorded (GET /dsp/track). Fired server-side by
-    # the simulator; set to a public/tunnel URL if you want a browser player to hit it.
-    "track_base": "http://localhost:8090",
-    # --- response identity + notice URLs (previously hardcoded in _build_bid) ---
-    # `[CB]` in a template is replaced with a fresh cache-buster nonce per bid.
-    # `${AUCTION_*}` are OpenRTB §4.4 macros the EXCHANGE substitutes on win — kept literal.
-    "campaign_id": "fake-dsp-campaign-1",
-    "iurl": "https://fakedsp-advertiser.com/preview.png",
-    "nurl_template": ("https://fakedsp-advertiser.com/win?price=${AUCTION_PRICE}"
-                      "&aid=${AUCTION_ID}&impid=${AUCTION_IMP_ID}&seat=${AUCTION_SEAT_ID}&cb=[CB]"),
-    "burl_template": "https://fakedsp-advertiser.com/billing?price=${AUCTION_PRICE}&cb=[CB]",
-    "lurl_template": "https://fakedsp-advertiser.com/loss?reason=${AUCTION_LOSS}",
-    # OpenRTB No-Bid Reason code returned when mode="no_bid" (0..10, see NBR above).
-    "nbr_code": 0,
-    # --- Advanced: full custom BidResponse template. When set to a non-empty object,
-    #     the DSP returns THIS (in bid mode) instead of the auto-built bid, substituting
-    #     the macros {{price}} {{impid}} {{id}} {{crid}} {{seat}} {{cur}}. A quoted
-    #     "{{price}}" becomes a JSON number. null/empty => normal auto-built bid. ---
-    "custom_response": None,
-}
-
-STATS: Dict[str, Any] = {
-    "requests": 0, "bids": 0, "no_bids": 0, "timeouts": 0, "errors": 0,
-    "total_bid_value": 0.0, "last_request": None, "last_response": None,
-    # Impression/quartile/click pixels this advertiser has RECEIVED (via /dsp/track).
-    "tracked": {}, "last_tracked": None,
-}
+# This is DSP "dsp-1" in the multi-DSP registry (app.dsp.registry) — the exact
+# same dict object, so mutating CONFIG/STATS in place (as this module, api/routes.py,
+# and the tests all do) stays in sync with the registry. Additional DSPs created via
+# the dashboard or POST /dsps get their own independent config/stats (see app.dsp.multi).
+CONFIG: Dict[str, Any] = registry.DSPS["dsp-1"]["config"]
+STATS: Dict[str, Any] = registry.DSPS["dsp-1"]["stats"]
 
 # 1x1 transparent GIF returned by the /dsp/track pixel.
 _PIXEL_GIF = (
@@ -113,41 +65,43 @@ router = APIRouter()
 
 
 # ----------------------------------------------------------------- creatives
-def _track_px(event: str, crid: str) -> str:
-    """A CDATA-wrapped, reachable tracking pixel URL for this advertiser's /dsp/track sink."""
-    base = str(CONFIG["track_base"]).rstrip("/")
-    return f"<![CDATA[{base}/dsp/track?ev={event}&crid={crid}&cb=[CACHEBUSTING]]]>"
+# `track_path` is the reachable sink this DSP's pixels should point at. dsp-1
+# uses its historical fixed "/dsp/track"; other DSPs (app.dsp.multi) pass
+# "/dsps/{dsp_id}/track" so hits land on that DSP's own stats.
+def _track_px(cfg: Dict[str, Any], event: str, crid: str, track_path: str = "/dsp/track") -> str:
+    """A CDATA-wrapped, reachable tracking pixel URL for this advertiser's track sink."""
+    base = str(cfg["track_base"]).rstrip("/")
+    return f"<![CDATA[{base}{track_path}?ev={event}&crid={crid}&cb=[CACHEBUSTING]]]>"
 
 
-def _vast_adm(crid: str, w: int, h: int) -> str:
+def _vast_adm(cfg: Dict[str, Any], crid: str, w: int, h: int, track_path: str = "/dsp/track") -> str:
     """A spec-valid, PLAYABLE VAST 4.2 InLine creative (adm).
 
-    Uses a real public MP4 (CONFIG['video_url']) so the ad plays in any VAST
+    Uses a real public MP4 (cfg['video_url']) so the ad plays in any VAST
     viewer, and points every Impression/quartile/click pixel at this mock DSP's
-    reachable /dsp/track sink so the hits can actually be recorded and counted.
+    reachable track sink so the hits can actually be recorded and counted.
     """
-    cfg = CONFIG
     vw, vh = int(cfg["video_w"]), int(cfg["video_h"])
     base = str(cfg["track_base"]).rstrip("/")
     return (
         '<VAST version="4.2"><Ad id="' + crid + '"><InLine>'
         '<AdSystem version="1.0">VoiseFakeDSP</AdSystem>'
         '<AdTitle>' + str(cfg["advertiser_name"]) + '</AdTitle>'
-        '<Impression id="fakedsp">' + _track_px("impression", crid) + '</Impression>'
-        f'<Error><![CDATA[{base}/dsp/track?ev=error&crid={crid}&code=[ERRORCODE]]]></Error>'
+        '<Impression id="fakedsp">' + _track_px(cfg, "impression", crid, track_path) + '</Impression>'
+        f'<Error><![CDATA[{base}{track_path}?ev=error&crid={crid}&code=[ERRORCODE]]]></Error>'
         '<Creatives><Creative id="' + crid + '" sequence="1">'
         '<UniversalAdId idRegistry="fakedsp.com">' + crid + '</UniversalAdId>'
         '<Linear><Duration>' + str(cfg["video_duration"]) + '</Duration>'
         '<TrackingEvents>'
-        '<Tracking event="start">' + _track_px("start", crid) + '</Tracking>'
-        '<Tracking event="firstQuartile">' + _track_px("firstQuartile", crid) + '</Tracking>'
-        '<Tracking event="midpoint">' + _track_px("midpoint", crid) + '</Tracking>'
-        '<Tracking event="thirdQuartile">' + _track_px("thirdQuartile", crid) + '</Tracking>'
-        '<Tracking event="complete">' + _track_px("complete", crid) + '</Tracking>'
+        '<Tracking event="start">' + _track_px(cfg, "start", crid, track_path) + '</Tracking>'
+        '<Tracking event="firstQuartile">' + _track_px(cfg, "firstQuartile", crid, track_path) + '</Tracking>'
+        '<Tracking event="midpoint">' + _track_px(cfg, "midpoint", crid, track_path) + '</Tracking>'
+        '<Tracking event="thirdQuartile">' + _track_px(cfg, "thirdQuartile", crid, track_path) + '</Tracking>'
+        '<Tracking event="complete">' + _track_px(cfg, "complete", crid, track_path) + '</Tracking>'
         '</TrackingEvents>'
         '<VideoClicks>'
         '<ClickThrough id="fakedsp"><![CDATA[' + str(cfg["landing_url"]) + ']]></ClickThrough>'
-        '<ClickTracking>' + _track_px("click", crid) + '</ClickTracking>'
+        '<ClickTracking>' + _track_px(cfg, "click", crid, track_path) + '</ClickTracking>'
         '</VideoClicks>'
         '<MediaFiles>'
         f'<MediaFile delivery="progressive" type="video/mp4" width="{vw}" height="{vh}" '
@@ -158,14 +112,14 @@ def _vast_adm(crid: str, w: int, h: int) -> str:
     )
 
 
-def _banner_adm(w: int, h: int) -> str:
-    base = str(CONFIG["track_base"]).rstrip("/")
-    lp = str(CONFIG["landing_url"])
+def _banner_adm(cfg: Dict[str, Any], w: int, h: int, track_path: str = "/dsp/track") -> str:
+    base = str(cfg["track_base"]).rstrip("/")
+    lp = str(cfg["landing_url"])
     return (
         f'<a href="{lp}" target="_blank" rel="noopener"><img '
         f'src="https://dummyimage.com/{w}x{h}/2b6cb0/ffffff.png&text=Voise+Fake+Ad" '
         f'width="{w}" height="{h}" border="0" alt="Voise Fake Ad"/></a>'
-        f'<img src="{base}/dsp/track?ev=impression&cb=[CACHEBUSTING]" '
+        f'<img src="{base}{track_path}?ev=impression&cb=[CACHEBUSTING]" '
         f'width="1" height="1" style="display:none" alt=""/>'
     )
 
@@ -212,10 +166,12 @@ def _deal_for(imp: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _build_bid(req_id: str, imp: Dict[str, Any], price: float, cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _build_bid(req_id: str, imp: Dict[str, Any], price: float, cfg: Dict[str, Any],
+                track_path: str = "/dsp/track") -> Dict[str, Any]:
     kind, w, h = _imp_format(imp)
     crid = str(cfg["crid"])
-    adm = _vast_adm(crid, w or 640, h or 480) if kind in ("video", "audio") else _banner_adm(w or 300, h or 250)
+    adm = (_vast_adm(cfg, crid, w or 640, h or 480, track_path) if kind in ("video", "audio")
+           else _banner_adm(cfg, w or 300, h or 250, track_path))
     # Notice URLs come from the (configurable) templates. `[CB]` is a DSP-generated
     # cache-buster nonce substituted here; the `${AUCTION_*}` OpenRTB §4.4 macros are
     # left literal for the exchange to substitute on win. (VAST [CACHEBUSTING] lives
@@ -273,15 +229,16 @@ def _summarize_request(body: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _log_decision(req: Dict[str, Any], decision: Dict[str, Any]) -> None:
-    if not CONFIG.get("verbose"):
+def _log_decision(cfg: Dict[str, Any], req: Dict[str, Any], decision: Dict[str, Any],
+                   label: str = "MOCK DSP") -> None:
+    if not cfg.get("verbose"):
         return
     bar = "=" * 66
     sep = "-" * 66
     lines = [
         "",
         bar,
-        "  MOCK DSP  <--  OpenRTB bid request",
+        f"  {label}  <--  OpenRTB bid request",
         sep,
         f"  request id : {req['id']}",
         f"  imps       : {req['imp_count']}  [{'; '.join(req['formats'])}]",
@@ -307,35 +264,35 @@ def _log_decision(req: Dict[str, Any], decision: Dict[str, Any]) -> None:
     logger.info("\n".join(lines))
 
 
-# ----------------------------------------------------------------- endpoints
-@router.get("/health")
-async def dsp_health() -> Dict[str, Any]:
-    return {"ok": True, "config": CONFIG, "stats": STATS}
+# ----------------------------------------------------------------- endpoint bodies
+# These take `cfg`/`stats` explicitly so they can serve ANY registered DSP, not
+# just dsp-1. The fixed `/dsp/*` routes below call them with the module-level
+# CONFIG/STATS (dsp-1); `app.dsp.multi` calls them with another DSP's own
+# config/stats dict looked up from the registry.
+def _get_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return cfg
 
 
-@router.get("/config")
-async def dsp_get_config() -> Dict[str, Any]:
-    return CONFIG
-
-
-@router.post("/config")
-async def dsp_set_config(patch: Dict[str, Any]) -> Dict[str, Any]:
+def _set_config(cfg: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
     for k, v in (patch or {}).items():
-        if k in CONFIG:
-            CONFIG[k] = v
-    return CONFIG
+        if k in cfg:
+            cfg[k] = v
+    return cfg
 
 
-@router.post("/reset")
-async def dsp_reset() -> Dict[str, Any]:
-    STATS.update(requests=0, bids=0, no_bids=0, timeouts=0, errors=0,
+def _reset_stats(stats: Dict[str, Any]) -> Dict[str, Any]:
+    stats.update(requests=0, bids=0, no_bids=0, timeouts=0, errors=0,
                  total_bid_value=0.0, last_request=None, last_response=None,
                  tracked={}, last_tracked=None)
-    return STATS
+    return stats
 
 
-@router.get("/track")
-async def dsp_track(request: Request) -> Response:
+def _health(cfg: Dict[str, Any], stats: Dict[str, Any]) -> Dict[str, Any]:
+    return {"ok": True, "config": cfg, "stats": stats}
+
+
+async def _track_hit(cfg: Dict[str, Any], stats: Dict[str, Any], request: Request,
+                      label: str = "MOCK DSP (advertiser)") -> Response:
     """Impression/quartile/click sink for this advertiser's own creative pixels.
 
     The VAST built by _vast_adm points its <Impression>/<Tracking>/<ClickTracking>
@@ -344,138 +301,175 @@ async def dsp_track(request: Request) -> Response:
     GIF so it also works as a plain <img> pixel."""
     params = dict(request.query_params)
     ev = params.get("ev", "unknown")
-    STATS["tracked"][ev] = STATS["tracked"].get(ev, 0) + 1
-    STATS["last_tracked"] = {"ev": ev, "params": params}
-    if CONFIG.get("verbose"):
-        logger.info("  MOCK DSP (advertiser)  <--  TRACKER FIRED  ev=%s  %s", ev, params)
+    stats["tracked"][ev] = stats["tracked"].get(ev, 0) + 1
+    stats["last_tracked"] = {"ev": ev, "params": params}
+    if cfg.get("verbose"):
+        logger.info("  %s  <--  TRACKER FIRED  ev=%s  %s", label, ev, params)
     return Response(content=_PIXEL_GIF, media_type="image/gif",
                     headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"})
 
 
-@router.get("/vast")
-async def dsp_vast(request: Request) -> Response:
+def _serve_vast(cfg: Dict[str, Any], request: Request, track_path: str = "/dsp/track") -> Response:
     """Serve the advertiser's VAST creative directly as a tag URL.
 
     Handy for VAST inspectors/players that accept a tag URL (that can reach this
     host). The creative is self-contained with a public MP4, so it also plays when
     the XML is pasted into a viewer."""
-    crid = str(CONFIG["crid"])
-    w = int(request.query_params.get("w", CONFIG["video_w"]))
-    h = int(request.query_params.get("h", CONFIG["video_h"]))
-    xml = _vast_adm(crid, w, h)
+    crid = str(cfg["crid"])
+    w = int(request.query_params.get("w", cfg["video_w"]))
+    h = int(request.query_params.get("h", cfg["video_h"]))
+    xml = _vast_adm(cfg, crid, w, h, track_path)
     return Response(content=xml, media_type="application/xml",
                     headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"})
 
 
-def _no_bid_response(req_id: str, reason: str, nbr: int = 0) -> Response:
-    STATS["no_bids"] += 1
-    if CONFIG.get("emit_nbr"):
+def _no_bid_response(cfg: Dict[str, Any], stats: Dict[str, Any], req_id: str,
+                      reason: str, nbr: int = 0) -> Response:
+    stats["no_bids"] += 1
+    if cfg.get("emit_nbr"):
         # §7.1 canonical "no-bid with reason": {id, seatbid:[], nbr}.
-        body = {"id": req_id, "seatbid": [], "nbr": nbr, "cur": CONFIG["currency"]}
-        STATS["last_response"] = {"decision": "no_bid", "nbr": nbr, "reason": reason}
+        body = {"id": req_id, "seatbid": [], "nbr": nbr, "cur": cfg["currency"]}
+        stats["last_response"] = {"decision": "no_bid", "nbr": nbr, "reason": reason}
         return Response(status_code=200, content=json.dumps(body), media_type="application/json")
-    STATS["last_response"] = {"decision": "no_bid", "http": 204, "reason": reason}
+    stats["last_response"] = {"decision": "no_bid", "http": 204, "reason": reason}
     return Response(status_code=204)
+
+
+async def _handle_bid(cfg: Dict[str, Any], stats: Dict[str, Any], request: Request,
+                       tag_id: str = "", track_path: str = "/dsp/track",
+                       label: str = "MOCK DSP") -> Response:
+    stats["requests"] += 1
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        # §2.1: a malformed/corrupt payload should return HTTP 400 with no content.
+        stats["errors"] += 1
+        logger.info("%s  <--  malformed bid request -> HTTP 400", label)
+        return Response(status_code=400)
+    if not isinstance(body, dict):
+        stats["errors"] += 1
+        return Response(status_code=400)
+    req_id = str(body.get("id", "unknown"))
+    summary = _summarize_request(body)
+    stats["last_request"] = summary
+
+    mode = cfg["mode"]
+    if mode == "timeout":
+        stats["timeouts"] += 1
+        _log_decision(cfg, summary, {"type": "timeout", "reason": f"sleeping {cfg['timeout_ms']}ms"}, label)
+        await asyncio.sleep(max(0.0, float(cfg["timeout_ms"]) / 1000.0))
+        return _no_bid_response(cfg, stats, req_id, "timeout", nbr=1)
+    if mode == "error":
+        stats["errors"] += 1
+        _log_decision(cfg, summary, {"type": "error", "reason": "forced 500"}, label)
+        return Response(status_code=500, content='{"error":"fake dsp forced error"}',
+                        media_type="application/json")
+    if mode == "no_bid":
+        _nbr = int(cfg.get("nbr_code", 0) or 0)
+        _log_decision(cfg, summary, {"type": "no_bid", "nbr": _nbr, "reason": "configured mode=no_bid"}, label)
+        return _no_bid_response(cfg, stats, req_id, "configured mode=no_bid", nbr=_nbr)
+    if random.random() > float(cfg["bid_rate"]):
+        _log_decision(cfg, summary, {"type": "no_bid", "nbr": 0, "reason": "lost internal bid throttle (bid_rate)"}, label)
+        return _no_bid_response(cfg, stats, req_id, "bid_rate throttle", nbr=0)
+
+    imps = body.get("imp") or []
+    if not imps:
+        _log_decision(cfg, summary, {"type": "no_bid", "nbr": 2, "reason": "no imp in request"}, label)
+        return _no_bid_response(cfg, stats, req_id, "no imp", nbr=2)
+
+    # Advanced: a full custom response template overrides the auto-built bid (bid mode).
+    # Macros: quoted "{{price}}" -> JSON number; {{price}}/{{impid}}/{{id}}/{{crid}}/
+    # {{seat}}/{{cur}} substituted as strings. Falls back to the auto bid on any error.
+    custom = cfg.get("custom_response")
+    if custom:
+        try:
+            price0, reason0 = _value_imp(imps[0], cfg)
+            if price0 is None:
+                _nbr = int(cfg.get("nbr_code", 0) or 0)
+                _log_decision(cfg, summary, {"type": "no_bid", "nbr": _nbr, "reason": reason0}, label)
+                return _no_bid_response(cfg, stats, req_id, reason0, nbr=_nbr)
+            s = json.dumps(custom).replace('"{{price}}"', json.dumps(price0))
+            for tok, val in (("{{price}}", str(price0)), ("{{impid}}", str(imps[0].get("id", "1"))),
+                             ("{{id}}", req_id), ("{{crid}}", str(cfg["crid"])),
+                             ("{{seat}}", str(cfg["seat"])), ("{{cur}}", str(cfg["currency"]))):
+                s = s.replace(tok, val)
+            resp = json.loads(s)
+            if isinstance(resp, dict):
+                resp.setdefault("id", req_id)
+            stats["bids"] += 1
+            stats["total_bid_value"] = round(stats["total_bid_value"] + float(price0), 4)
+            stats["last_response"] = {"decision": "bid_custom", "prices": [price0]}
+            _log_decision(cfg, summary, {"type": "bid", "seat": cfg["seat"], "cur": cfg["currency"],
+                                    "bids": [{"impid": str(imps[0].get("id", "1")), "price": price0,
+                                              "mtype": "custom", "crid": str(cfg["crid"]),
+                                              "adomain": list(cfg["adomain"]), "nurl": "(custom template)"}]}, label)
+            return Response(status_code=200, content=json.dumps(resp), media_type="application/json")
+        except Exception as e:  # noqa: BLE001 — a bad template must never crash the DSP
+            logger.warning("%s custom_response failed (%s); falling back to auto-built bid", label, e)
+
+    bids: List[Dict[str, Any]] = []
+    skipped: List[str] = []
+    for imp in imps:
+        price, reason = _value_imp(imp, cfg)
+        if price is None:
+            skipped.append(reason)
+            continue
+        bids.append(_build_bid(req_id, imp, price, cfg, track_path))
+
+    if not bids:
+        _log_decision(cfg, summary, {"type": "no_bid", "nbr": 0,
+                                "reason": "; ".join(skipped) or "no eligible imp"}, label)
+        return _no_bid_response(cfg, stats, req_id, "; ".join(skipped) or "no eligible imp", nbr=0)
+
+    payload = {
+        "id": req_id,
+        "bidid": f"{req_id}-resp",
+        "cur": cfg["currency"],
+        "seatbid": [{"seat": cfg["seat"], "group": 0, "bid": bids}],
+    }
+    stats["bids"] += 1
+    stats["total_bid_value"] = round(stats["total_bid_value"] + sum(b["price"] for b in bids), 4)
+    stats["last_response"] = {"decision": "bid", "seat": cfg["seat"],
+                              "prices": [b["price"] for b in bids]}
+    _log_decision(cfg, summary, {"type": "bid", "seat": cfg["seat"], "cur": cfg["currency"], "bids": bids}, label)
+    return Response(status_code=200, content=json.dumps(payload), media_type="application/json")
+
+
+# ----------------------------------------------------------------- endpoints (dsp-1, fixed paths)
+@router.get("/health")
+async def dsp_health() -> Dict[str, Any]:
+    return _health(CONFIG, STATS)
+
+
+@router.get("/config")
+async def dsp_get_config() -> Dict[str, Any]:
+    return _get_config(CONFIG)
+
+
+@router.post("/config")
+async def dsp_set_config(patch: Dict[str, Any]) -> Dict[str, Any]:
+    return _set_config(CONFIG, patch)
+
+
+@router.post("/reset")
+async def dsp_reset() -> Dict[str, Any]:
+    return _reset_stats(STATS)
+
+
+@router.get("/track")
+async def dsp_track(request: Request) -> Response:
+    return await _track_hit(CONFIG, STATS, request)
+
+
+@router.get("/vast")
+async def dsp_vast(request: Request) -> Response:
+    return _serve_vast(CONFIG, request)
 
 
 @router.api_route("/bid", methods=["POST"])
 @router.api_route("/bid/{tag_id}", methods=["POST"])
 async def dsp_bid(request: Request, tag_id: str = "") -> Response:
-    STATS["requests"] += 1
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        # §2.1: a malformed/corrupt payload should return HTTP 400 with no content.
-        STATS["errors"] += 1
-        logger.info("MOCK DSP  <--  malformed bid request -> HTTP 400")
-        return Response(status_code=400)
-    if not isinstance(body, dict):
-        STATS["errors"] += 1
-        return Response(status_code=400)
-    req_id = str(body.get("id", "unknown"))
-    summary = _summarize_request(body)
-    STATS["last_request"] = summary
-
-    mode = CONFIG["mode"]
-    if mode == "timeout":
-        STATS["timeouts"] += 1
-        _log_decision(summary, {"type": "timeout", "reason": f"sleeping {CONFIG['timeout_ms']}ms"})
-        await asyncio.sleep(max(0.0, float(CONFIG["timeout_ms"]) / 1000.0))
-        return _no_bid_response(req_id, "timeout", nbr=1)
-    if mode == "error":
-        STATS["errors"] += 1
-        _log_decision(summary, {"type": "error", "reason": "forced 500"})
-        return Response(status_code=500, content='{"error":"fake dsp forced error"}',
-                        media_type="application/json")
-    if mode == "no_bid":
-        _nbr = int(CONFIG.get("nbr_code", 0) or 0)
-        _log_decision(summary, {"type": "no_bid", "nbr": _nbr, "reason": "configured mode=no_bid"})
-        return _no_bid_response(req_id, "configured mode=no_bid", nbr=_nbr)
-    if random.random() > float(CONFIG["bid_rate"]):
-        _log_decision(summary, {"type": "no_bid", "nbr": 0, "reason": "lost internal bid throttle (bid_rate)"})
-        return _no_bid_response(req_id, "bid_rate throttle", nbr=0)
-
-    imps = body.get("imp") or []
-    if not imps:
-        _log_decision(summary, {"type": "no_bid", "nbr": 2, "reason": "no imp in request"})
-        return _no_bid_response(req_id, "no imp", nbr=2)
-
-    # Advanced: a full custom response template overrides the auto-built bid (bid mode).
-    # Macros: quoted "{{price}}" -> JSON number; {{price}}/{{impid}}/{{id}}/{{crid}}/
-    # {{seat}}/{{cur}} substituted as strings. Falls back to the auto bid on any error.
-    custom = CONFIG.get("custom_response")
-    if custom:
-        try:
-            price0, reason0 = _value_imp(imps[0], CONFIG)
-            if price0 is None:
-                _nbr = int(CONFIG.get("nbr_code", 0) or 0)
-                _log_decision(summary, {"type": "no_bid", "nbr": _nbr, "reason": reason0})
-                return _no_bid_response(req_id, reason0, nbr=_nbr)
-            s = json.dumps(custom).replace('"{{price}}"', json.dumps(price0))
-            for tok, val in (("{{price}}", str(price0)), ("{{impid}}", str(imps[0].get("id", "1"))),
-                             ("{{id}}", req_id), ("{{crid}}", str(CONFIG["crid"])),
-                             ("{{seat}}", str(CONFIG["seat"])), ("{{cur}}", str(CONFIG["currency"]))):
-                s = s.replace(tok, val)
-            resp = json.loads(s)
-            if isinstance(resp, dict):
-                resp.setdefault("id", req_id)
-            STATS["bids"] += 1
-            STATS["total_bid_value"] = round(STATS["total_bid_value"] + float(price0), 4)
-            STATS["last_response"] = {"decision": "bid_custom", "prices": [price0]}
-            _log_decision(summary, {"type": "bid", "seat": CONFIG["seat"], "cur": CONFIG["currency"],
-                                    "bids": [{"impid": str(imps[0].get("id", "1")), "price": price0,
-                                              "mtype": "custom", "crid": str(CONFIG["crid"]),
-                                              "adomain": list(CONFIG["adomain"]), "nurl": "(custom template)"}]})
-            return Response(status_code=200, content=json.dumps(resp), media_type="application/json")
-        except Exception as e:  # noqa: BLE001 — a bad template must never crash the DSP
-            logger.warning("MOCK DSP custom_response failed (%s); falling back to auto-built bid", e)
-
-    bids: List[Dict[str, Any]] = []
-    skipped: List[str] = []
-    for imp in imps:
-        price, reason = _value_imp(imp, CONFIG)
-        if price is None:
-            skipped.append(reason)
-            continue
-        bids.append(_build_bid(req_id, imp, price, CONFIG))
-
-    if not bids:
-        _log_decision(summary, {"type": "no_bid", "nbr": 0,
-                                "reason": "; ".join(skipped) or "no eligible imp"})
-        return _no_bid_response(req_id, "; ".join(skipped) or "no eligible imp", nbr=0)
-
-    payload = {
-        "id": req_id,
-        "bidid": f"{req_id}-resp",
-        "cur": CONFIG["currency"],
-        "seatbid": [{"seat": CONFIG["seat"], "group": 0, "bid": bids}],
-    }
-    STATS["bids"] += 1
-    STATS["total_bid_value"] = round(STATS["total_bid_value"] + sum(b["price"] for b in bids), 4)
-    STATS["last_response"] = {"decision": "bid", "seat": CONFIG["seat"],
-                              "prices": [b["price"] for b in bids]}
-    _log_decision(summary, {"type": "bid", "seat": CONFIG["seat"], "cur": CONFIG["currency"], "bids": bids})
-    return Response(status_code=200, content=json.dumps(payload), media_type="application/json")
+    return await _handle_bid(CONFIG, STATS, request, tag_id)
 
 
 def create_dsp_app():

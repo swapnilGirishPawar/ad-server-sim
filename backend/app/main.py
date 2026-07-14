@@ -5,6 +5,8 @@ Run:  uvicorn app.main:app --port 8090 --reload   (from the backend/ dir)
 Mounts:
   /api    — simulator control + metrics + report API
   /dsp    — the built-in fake DSP (the SUT fans out to /dsp/bid)
+  /dsps   — additional independently-configurable mock DSPs (/dsps/{id}/bid),
+            for testing auctions with more than one bidder
   /       — the built React dashboard (if dashboard/dist exists)
 """
 from __future__ import annotations
@@ -25,6 +27,7 @@ from app.api.routes import router
 from app.api.run_manager import RunManager
 from app.config import get_settings
 from app.db import Database, set_db
+from app.dsp.multi import router as dsps_router
 from app.dsp.router import router as dsp_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -65,6 +68,7 @@ app.add_middleware(
 )
 app.include_router(router, prefix="/api")
 app.include_router(dsp_router, prefix="/dsp")
+app.include_router(dsps_router, prefix="/dsps")
 
 _DIST = Path(os.environ.get("DASHBOARD_DIST") or (Path(__file__).resolve().parents[2] / "dashboard" / "dist"))
 if _DIST.exists():
@@ -76,6 +80,7 @@ else:
             "name": "Ad Server Simulator",
             "api": "/api",
             "dsp": "/dsp/bid",
+            "dsps": "/dsps",
             "docs": "/docs",
             "note": "Dashboard not built. Run the Vite dev server in ../dashboard, "
                     "or `npm run build` to serve it from here.",
