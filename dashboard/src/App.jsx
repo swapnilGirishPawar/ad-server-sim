@@ -4,6 +4,7 @@ import { Card, Stat, Button, Field, Input, Select, Badge, cls } from './ui.jsx'
 import { Overview, Auctions, CampaignTable, Charts, Scenarios, Scorecard, FillBreakdown, Latency, Findings, FlowB } from './panels.jsx'
 import PublisherRequest from './publisher.jsx'
 import DspSettings from './dsp_settings.jsx'
+import VastPlayer from './vast_player.jsx'
 
 const SCENARIO_OPTIONS = [
   ['all', 'All (S1–S15)'], ['S1', 'S1 · Smoke'], ['S2', 'S2 · Normal traffic'],
@@ -15,7 +16,9 @@ const SCENARIO_OPTIONS = [
 ]
 
 export default function App() {
-  const [view, setView] = useState('dashboard')  // 'dashboard' | 'publisher'
+  const [view, setView] = useState('dashboard')  // 'dashboard' | 'publisher' | 'dsp' | 'vast'
+  const [vastSeed, setVastSeed] = useState(null)  // VAST handed to the player from another tab
+  const openInPlayer = useCallback((xml, meta) => { setVastSeed({ xml, meta, key: Date.now() }); setView('vast') }, [])
   const [health, setHealth] = useState(null)
   const [runs, setRuns] = useState([])
   const [runId, setRunId] = useState('')        // '' = all runs
@@ -93,7 +96,7 @@ export default function App() {
           </div>
         </div>
         <nav className="mt-2 flex gap-1">
-          {[['dashboard', 'Dashboard'], ['publisher', 'Publisher Ad Request'], ['dsp', 'DSP Settings']].map(([v, label]) => (
+          {[['dashboard', 'Dashboard'], ['publisher', 'Publisher Ad Request'], ['dsp', 'DSP Settings'], ['vast', 'VAST Player']].map(([v, label]) => (
             <button key={v} onClick={() => setView(v)}
               className={cls('rounded-md px-3 py-1 text-sm font-medium transition',
                 view === v ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200')}>
@@ -104,7 +107,7 @@ export default function App() {
       </header>
 
       <main className="mx-auto max-w-7xl space-y-4 p-6">
-        {view === 'publisher' ? <PublisherRequest /> : view === 'dsp' ? <DspSettings /> : (
+        {view === 'publisher' ? <PublisherRequest onOpenInPlayer={openInPlayer} /> : view === 'dsp' ? <DspSettings /> : view === 'vast' ? <VastPlayer seed={vastSeed} /> : (
         <>
         {err && <div className="rounded-lg border border-rose-800 bg-rose-950/40 px-3 py-2 text-sm text-rose-300">{String(err)}</div>}
 
@@ -147,7 +150,7 @@ export default function App() {
           </Card>
         </div>
 
-        {/* Flow B — OpenRTB auction against the mock DSP (one click) */}
+        {/* Flow B - OpenRTB auction against the mock DSP (one click) */}
         <FlowB />
 
         {/* Live progress */}
@@ -155,7 +158,7 @@ export default function App() {
           <Card title="Live run">
             <div className="grid grid-cols-3 gap-3 md:grid-cols-6">
               {['requests', 'fills', 'impressions', 'clicks', 'wins', 'errors'].map((k) => (
-                <Stat key={k} label={k} value={live[k] ?? (live.seed ? '—' : 0)} />
+                <Stat key={k} label={k} value={live[k] ?? (live.seed ? '-' : 0)} />
               ))}
             </div>
             {live.findings && <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-amber-300/90">{live.findings.map((f, i) => <li key={i}>{f}</li>)}</ul>}

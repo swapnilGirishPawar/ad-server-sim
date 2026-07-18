@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { Card, Stat, Button, Field, Input, Select, Badge, cls } from './ui.jsx'
 import { api } from './api.js'
 
-// A real publisher OpenRTB 2.6 CTV bid request (Samsung Tizen app) — editable, so
+// A real publisher OpenRTB 2.6 CTV bid request (Samsung Tizen app) - editable, so
 // you can paste your own and fire N copies verbatim. This is the "custom" path.
 const SAMPLE_ORTB = JSON.stringify({
   id: '15e5c56b5831a92a',
@@ -64,7 +64,7 @@ function Checkbox({ checked, onChange, label }) {
 
 const CLASS_TONE = { real: 'PASS', filler: 'WARN', no_fill: 'BLOCKED', error: 'FAIL', empty: 'ERROR' }
 
-export default function PublisherRequest() {
+export default function PublisherRequest({ onOpenInPlayer }) {
   const [form, setForm] = useState(DEFAULTS)
   const [useCustom, setUseCustom] = useState(false)
   const [customJson, setCustomJson] = useState(SAMPLE_ORTB)
@@ -128,11 +128,11 @@ export default function PublisherRequest() {
         </p>
         <div className="mt-2 grid gap-2 text-xs md:grid-cols-2">
           <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
-            <span className="font-semibold text-emerald-300">VAST tag</span> — an HTTP <b>GET</b> to
+            <span className="font-semibold text-emerald-300">VAST tag</span> - an HTTP <b>GET</b> to
             <code className="mx-1 text-slate-300">/api/v/{'{tag_id}'}</code>; returns <b>VAST XML</b> (the video ad). What a player/simple publisher sends.
           </div>
           <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
-            <span className="font-semibold text-sky-300">OpenRTB bid request</span> — an HTTP <b>POST</b> of a JSON
+            <span className="font-semibold text-sky-300">OpenRTB bid request</span> - an HTTP <b>POST</b> of a JSON
             BidRequest to <code className="mx-1 text-slate-300">/api/b/{'{tag_id}'}</code>; returns a JSON BidResponse or a <b>204</b> no-bid. What an SSP/programmatic supply sends (your sample).
           </div>
         </div>
@@ -182,7 +182,7 @@ export default function PublisherRequest() {
         </div>
 
         <button className="mt-3 text-xs text-slate-400 hover:text-slate-200" onClick={() => setAdvanced((v) => !v)}>
-          {advanced ? '▾' : '▸'} Advanced — privacy{isOrtb ? ' + paste custom OpenRTB JSON' : ''}
+          {advanced ? '▾' : '▸'} Advanced - privacy{isOrtb ? ' + paste custom OpenRTB JSON' : ''}
         </button>
         {advanced && (
           <div className="mt-2 space-y-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
@@ -260,17 +260,28 @@ export default function PublisherRequest() {
           )}
 
           {result.winning_vast && (
-            <Card title="Winning ad creative (VAST)" right={<Button variant="ghost" onClick={() => copy(result.winning_vast)}>Copy VAST</Button>}>
+            <Card title="Winning ad creative (VAST)" right={
+              <div className="flex gap-2">
+                {onOpenInPlayer && (
+                  <Button onClick={() => onOpenInPlayer(result.winning_vast, {
+                    label: 'Publisher Ad Request (winning bid)',
+                    endpoint: result.endpoint,
+                    status: result.sample_response?.status_code,
+                  })}>Open in VAST Player</Button>
+                )}
+                <Button variant="ghost" onClick={() => copy(result.winning_vast)}>Copy VAST</Button>
+              </div>
+            }>
               <p className="mb-2 text-xs text-slate-500">
                 The exact VAST the ad server returned (with its tracking pixel injected). The video is a public MP4, so
-                it plays in any VAST viewer — copy this and paste it into a VAST inspector to watch the ad.
+                it plays in any VAST viewer - copy this and paste it into a VAST inspector to watch the ad.
               </p>
               <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-slate-950 p-3 text-xs text-slate-300">{result.winning_vast}</pre>
             </Card>
           )}
 
           {result.playback && (
-            <Card title="Playback — trackers fired server-side">
+            <Card title="Playback - trackers fired server-side">
               <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-4">
                 <Stat label="Pixels fired OK" value={`${result.playback.ok}/${result.playback.total}`} tone={result.playback.ok === result.playback.total ? 'good' : 'warn'} />
                 <Stat label="Ad server hits" value={result.playback.ad_server_hits} tone="good" sub="paid impression + win" />
@@ -313,7 +324,7 @@ export default function PublisherRequest() {
                       <td className={cls('py-1.5 pr-3 tabular-nums', r.status_code >= 500 || r.status_code === 0 ? 'text-rose-300' : 'text-slate-300')}>{r.status_code || 'ERR'}</td>
                       <td className="py-1.5 pr-3">{r.filled ? <span className="text-emerald-400">yes</span> : <span className="text-slate-500">no</span>}</td>
                       <td className="py-1.5 pr-3"><Badge verdict={CLASS_TONE[r.classification] || 'ERROR'}>{r.classification}</Badge></td>
-                      <td className="py-1.5 pr-3 text-right tabular-nums">{r.price != null ? `$${Number(r.price).toFixed(2)}` : '—'}</td>
+                      <td className="py-1.5 pr-3 text-right tabular-nums">{r.price != null ? `$${Number(r.price).toFixed(2)}` : '-'}</td>
                       <td className="py-1.5 pr-3 text-right tabular-nums">{r.latency_ms} ms</td>
                       <td className="py-1.5 pr-3">{r.conformant ? <span className="text-emerald-400">✓</span> : <span className="text-rose-300">✗ {r.fail_count}</span>}</td>
                       <td className="py-1.5 text-slate-500">{r.no_fill_reason || r.campaign || ''}</td>

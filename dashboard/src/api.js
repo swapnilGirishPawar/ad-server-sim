@@ -39,8 +39,8 @@ export const api = {
   publisherRequest: (b) => j('POST', '/publisher-request', b),
 }
 
-// Raw mock-DSP control (endpoints live at /dsps/*, NOT under /api — same origin).
-// Every DSP — including the original default one, id 'dsp-1' — is reachable
+// Raw mock-DSP control (endpoints live at /dsps/*, NOT under /api - same origin).
+// Every DSP - including the original default one, id 'dsp-1' - is reachable
 // uniformly at /dsps/{dspId}/... . `dspId` defaults to 'dsp-1' so existing
 // no-arg call sites (e.g. panels.jsx's Flow B) keep working unchanged.
 async function raw(method, path, body) {
@@ -66,7 +66,15 @@ export async function dspReset(dspId = 'dsp-1') {
   return res.ok ? res.json() : null
 }
 
-// The mock DSP lives at /dsps/{dspId}/bid (NOT under /api) — same origin, so
+// Fetch a mock DSP's live VAST creative as raw XML text (for the VAST Player).
+// Same origin (served at :8090), so no CORS concerns.
+export async function dspGetVast(dspId = 'dsp-1') {
+  const res = await fetch(`/dsps/${encodeURIComponent(dspId)}/vast`)
+  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`)
+  return res.text()
+}
+
+// The mock DSP lives at /dsps/{dspId}/bid (NOT under /api) - same origin, so
 // the browser can call it directly to show that DSP's own raw bid response.
 export async function dspBidRaw(dspId = 'dsp-1') {
   const sample = {
@@ -150,7 +158,7 @@ export async function dspBidRaw(dspId = 'dsp-1') {
   const res = await fetch(`/dsps/${encodeURIComponent(dspId)}/bid`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(sample),
   })
-  if (res.status === 204) return { _note: 'HTTP 204 — DSP no-bid (no body)' }
+  if (res.status === 204) return { _note: 'HTTP 204 - DSP no-bid (no body)' }
   const text = await res.text()
   return text ? JSON.parse(text) : { _note: `HTTP ${res.status}` }
 }

@@ -11,7 +11,7 @@ const fmtTime = (ms) => {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 const pct = (x) => `${(x * 100).toFixed(2)}%`
-const money = (x) => (x == null ? '—' : `$${Number(x).toFixed(2)}`)
+const money = (x) => (x == null ? '-' : `$${Number(x).toFixed(2)}`)
 
 const AXIS = { stroke: '#64748b', fontSize: 11 }
 const GRID = '#1e293b'
@@ -139,7 +139,7 @@ export function Scenarios({ rows }) {
         {rows.map((r, i) => (
           <div key={i} className="rounded-lg border border-slate-800 bg-slate-950/40 p-3">
             <div className="flex items-center justify-between">
-              <div className="font-semibold text-slate-100">Scenario {r.scenario} — {r.title}</div>
+              <div className="font-semibold text-slate-100">Scenario {r.scenario} - {r.title}</div>
               <Badge verdict={r.verdict} />
             </div>
             <div className="mt-2 grid gap-1 text-sm">
@@ -306,7 +306,7 @@ export function FlowB() {
             </div>
             <Stat label="Ad server outcome" value={won ? 'WON' : 'NO WINNER'} tone={won ? 'good' : 'warn'}
               sub={`HTTP ${ad.status}`} />
-            <Stat label="Clearing price" value={ad.price != null ? `$${ad.price}` : '—'}
+            <Stat label="Clearing price" value={ad.price != null ? `$${ad.price}` : '-'}
               sub={ad.winner_seat ? `seat: ${ad.winner_seat}` : ''} />
             <Stat label="Auction latency" value={`${ad.latency_ms} ms`}
               sub={ad.conformant ? 'spec-conformant ✓' : 'conformance fail'} tone={ad.conformant ? 'good' : 'bad'} />
@@ -316,7 +316,7 @@ export function FlowB() {
             <Flag ok={ad.adm_has_vast} label="VAST creative returned (adm)" />
             <Flag ok={ad.dsp_nurl_chained} label="DSP win-notice chained (dsp_nurl)" />
           </div>
-          {ad.error && <div className="text-sm text-rose-300">Ad server error: {ad.error} — try again (cold start / raise timeout).</div>}
+          {ad.error && <div className="text-sm text-rose-300">Ad server error: {ad.error} - try again (cold start / raise timeout).</div>}
           {ad.fail_findings?.length > 0 && (
             <ul className="list-disc space-y-1 pl-5 text-xs text-rose-300">
               {ad.fail_findings.map((f, i) => <li key={i}>{f.spec_section}: {f.observed}</li>)}
@@ -349,4 +349,4 @@ function Flag({ ok, label }) {
 }
 
 const TT = { background: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, fontSize: 12, color: '#e2e8f0' }
-const Empty = () => <div className="py-8 text-center text-sm text-slate-600">No data yet — seed and run traffic.</div>
+const Empty = () => <div className="py-8 text-center text-sm text-slate-600">No data yet - seed and run traffic.</div>

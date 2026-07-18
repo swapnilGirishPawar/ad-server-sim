@@ -84,7 +84,10 @@ class AdServerClient:
 
     def _url(self, cap: str, **fmt: Any) -> str:
         path = self.routes.get(cap, DEFAULT_ROUTES.get(cap, ""))
-        return self.s.root_base + path.format(**fmt)
+        # Strip stray whitespace (tabs/newlines) from pasted ids: httpx rejects
+        # non-printable chars in a URL and would 500 the request otherwise.
+        clean = {k: (v.strip() if isinstance(v, str) else v) for k, v in fmt.items()}
+        return self.s.root_base + path.format(**clean)
 
     # ------------------------------------------------------------------ auth
     def _auth_headers(self) -> Dict[str, str]:

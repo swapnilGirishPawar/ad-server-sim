@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { Card, Stat, Button, Field, Input, Select, Badge, cls } from './ui.jsx'
 import { dspList, dspCreate, dspDelete, dspSetConfig, dspReset, dspBidRaw } from './api.js'
 
-// OpenRTB No-Bid Reason codes (2.6 §5.24 / List 5.24) — shown when mode = no_bid.
+// OpenRTB No-Bid Reason codes (2.6 §5.24 / List 5.24) - shown when mode = no_bid.
 const NBR_CODES = [
   [0, '0 · Unknown / other'], [1, '1 · Technical error'], [2, '2 · Invalid request'],
   [3, '3 · Known web spider'], [4, '4 · Suspected non-human'], [5, '5 · Cloud/DC/proxy IP'],
@@ -114,7 +114,7 @@ export default function DspSettings() {
     setTestResp(null)
   }
 
-  // Reload the full DSP list and (re)select a DSP by id — preferId, else the
+  // Reload the full DSP list and (re)select a DSP by id - preferId, else the
   // currently active one if it still exists, else the first registered DSP.
   const load = useCallback(async (preferId) => {
     setErr(null)
@@ -209,18 +209,18 @@ export default function DspSettings() {
         <p className="text-sm text-slate-400">
           Configure one or more mock demand partners so your ad server's auction has multiple bidders to
           compete against. Add a DSP here, copy its endpoint, and register it as a new demand partner on the
-          real ad server — then a single publisher request can be won by any of them.
+          real ad server - then a single publisher request can be won by any of them.
         </p>
         <div className="mt-3">
           <DspTabs dsps={dsps} activeId={activeId} onSelect={selectDsp} onAdd={doAdd} onRemove={doRemove} busy={busy} />
         </div>
       </Card>
 
-      <Card title={`${dsps.find((d) => d.id === activeId)?.name || 'DSP'} — behaviour`}
+      <Card title={`${dsps.find((d) => d.id === activeId)?.name || 'DSP'} - behaviour`}
         right={saved && <span className="text-xs text-emerald-400">{saved}</span>}>
         <p className="text-sm text-slate-400">
           Control how this mock demand partner responds when your ad server asks it to bid. Changes here
-          take effect on the <b>next</b> request — no restart. Endpoint: <code className="text-indigo-300">{endpoint}</code>
+          take effect on the <b>next</b> request - no restart. Endpoint: <code className="text-indigo-300">{endpoint}</code>
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="text-xs uppercase tracking-wide text-slate-500">Behaviour:</span>
@@ -332,14 +332,14 @@ export default function DspSettings() {
           <code className="mx-1">{'{{price}}'}</code><code className="mx-1">{'{{impid}}'}</code>
           <code className="mx-1">{'{{id}}'}</code><code className="mx-1">{'{{crid}}'}</code>
           <code className="mx-1">{'{{seat}}'}</code><code className="mx-1">{'{{cur}}'}</code>
-          — a quoted <code>"{'{{price}}'}"</code> becomes a number. Remember to click <b>Save settings</b>.
+          - a quoted <code>"{'{{price}}'}"</code> becomes a number. Remember to click <b>Save settings</b>.
         </p>
         <Textarea rows={14} value={customText} disabled={!useCustom} onChange={(e) => setCustomText(e.target.value)} />
       </Card>
 
       {/* Test bid result */}
       {testResp && (
-        <Card title="Test bid — what the DSP returned">
+        <Card title="Test bid - what the DSP returned">
           <pre className="max-h-96 overflow-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-300">{JSON.stringify(testResp, null, 2)}</pre>
         </Card>
       )}
