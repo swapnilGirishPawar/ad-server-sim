@@ -102,18 +102,19 @@ If the light is green, you're ready.
 
 ---
 
-## 6. The three tabs (where everything lives)
+## 6. The four tabs (where everything lives)
 
-At the top of the page you'll see three tabs. Use them for different jobs:
+At the top of the page you'll see four tabs. Use them for different jobs:
 
 | Tab | What it's for |
 |---|---|
 | **Dashboard** | Create test data, send bulk traffic, run automated S1–S15 scenarios, read scorecards |
-| **Publisher Ad Request** | Fire a specific publisher's ad request (VAST or OpenRTB), inspect the response, optionally **simulate playback** |
+| **Publisher Ad Request** | Fire a specific publisher's ad request (VAST or OpenRTB), inspect the response, optionally **simulate playback**, or **Open in VAST Player** |
 | **DSP Settings** | Control the fake buyer — bid / no-bid / timeout / error, price, creative, notice URLs |
+| **VAST Player** | Paste or load a VAST tag, watch the video play, and see impression / quartile / click pixels fire live |
 
 A good testing day usually goes: **Dashboard (seed)** → **DSP Settings (set the buyer)** →
-**Publisher Ad Request (fire a real auction)** → **Dashboard (run scenarios / read GAP report)**.
+**Publisher Ad Request (fire a real auction)** → **VAST Player (watch + track)** → **Dashboard (run scenarios / read GAP report)**.
 
 ---
 
@@ -343,9 +344,21 @@ Then:
 
 - Aggregate tiles: fill / no-fill / errors / latency.
 - Sample request + sample response (with conformance findings).
-- **Winning ad creative (VAST)** — copy it and paste into a VAST inspector to **watch the ad**.
+- **Winning ad creative (VAST)** — copy it, or click **Open in VAST Player** to watch and fire trackers in the browser.
 - **Playback** panel (if you ticked Simulate playback) — which pixels succeeded, how many hit
   the ad server vs the fake advertiser.
+
+---
+
+## 10b. VAST Player — watch the ad and see trackers fire
+
+Open the **VAST Player** tab when you want to **play** a VAST creative like a real video player would.
+
+1. **Paste** VAST XML and click **Load & Play**, or **Load sample**, or pick a mock DSP and **Load from DSP**.
+2. Or from **Publisher Ad Request**, after a win click **Open in VAST Player**.
+3. Watch the video; the tracking diagram lights up as impression → start → 25% → 50% → 75% → complete fire.
+4. Leave **"Fire real tracking pixels"** on so those hits reach the ad server / mock DSP (and show up on the Dashboard).
+5. Use **Simulate click** to fire click trackers.
 
 ---
 

@@ -28,7 +28,7 @@ A standalone test harness for the **Voise Ad Server** (the *system under test*, 
 1. **Seeds** publishers, ad units, advertisers, campaigns, creatives, and optionally registers the built-in mock DSP as a demand partner.
 2. **Drives traffic** (VAST tags and/or OpenRTB auctions) at configurable RPS/concurrency with ramp-up and SLO checks.
 3. **Acts as the buyer** via a controllable **mock DSP** so OpenRTB auctions can actually win.
-4. **Simulates a player** — wrapper resolution, VAST macros, ordered quartile fire-back, optional post-win **playback** of impression/quartile/win pixels.
+4. **Simulates a player** — wrapper resolution, VAST macros, ordered quartile fire-back, optional post-win **playback** of impression/quartile/win pixels, plus an in-dashboard **VAST Player** that plays creatives in the browser and fires real tracking pixels.
 5. **Validates** every response against IAB VAST 4.x, VMAP 1.0, OpenRTB 2.5/2.6, and supply-chain files (`ads.txt` / `app-ads.txt` / `sellers.json` / sChain).
 6. **Reports** a per-standard scorecard, machine-readable `gaps.json`, and human-readable `GAP_REPORT.md`.
 
@@ -75,11 +75,17 @@ ad-server-sim/
 │   └── .env.example
 ├── dashboard/                    React · Vite · Tailwind · Recharts
 │   └── src/
-│       ├── App.jsx               shell + 3 views (Dashboard / Publisher / DSP)
-│       ├── publisher.jsx         Publisher Ad Request tester (+ simulate playback)
+│       ├── App.jsx               shell + 4 views (Dashboard / Publisher / DSP / VAST Player)
+│       ├── publisher.jsx         Publisher Ad Request tester (+ simulate playback, Open in VAST Player)
 │       ├── dsp_settings.jsx      Mock DSP control UI
+│       ├── vast_player.jsx       in-browser VAST player + live tracking timeline
+│       ├── vast/                 client-side VAST parse / tracking / sample / UI cards
+│       │   ├── parse.js          DOMParser-based VAST 2/3/4 InLine + Wrapper detect
+│       │   ├── tracking.js       quartile timing, macro sub, image-pixel beacons
+│       │   ├── sample.js         built-in playable VAST 4.2 sample
+│       │   └── components.jsx    TrackingDiagram, EventsTable, ParsedInfoCard, …
 │       ├── panels.jsx            scorecard, charts, findings, scenarios, …
-│       ├── api.js                /api client + /dsp helpers
+│       ├── api.js                /api client + /dsp + /dsps helpers
 │       └── ui.jsx                shared UI primitives
 ├── postman/                      E2E Postman collection
 ├── scenarios/                    legacy A–D JSON fixtures + example output
@@ -234,9 +240,9 @@ Standalone process: `python -m app.dsp.router` → `:8095/dsp/bid`.
 
 ## Dashboard
 
-Open `http://localhost:8090` (production build served by FastAPI) or `http://localhost:5173` (Vite dev; proxies `/api` and `/dsp` to the backend).
+Open `http://localhost:8090` (production build served by FastAPI) or `http://localhost:5173` (Vite dev; proxies `/api`, `/dsp`, and `/dsps` to the backend).
 
-Three views in the header:
+Four views in the header:
 
 ### 1. Dashboard
 
@@ -260,8 +266,10 @@ Focused tester — no seeding required (serve endpoints are public):
 
 **Simulate playback** (checkbox): after a win, the backend parses the winning VAST, fires impression + quartile pixels and win/billing notices (`nurl`/`burl`) server-side. DSP pixels at `/dsp/track` are left as-is (with `https→http` downgrade for local fake DSP); ad-server pixels get host/prefix normalization. Response includes:
 
-- `winning_vast` — full creative markup (copyable for a VAST inspector)
+- `winning_vast` — full creative markup (copyable, or open directly in the **VAST Player** tab)
 - `playback` — per-pixel fire results + ad-server vs advertiser hit counts
+
+**Open in VAST Player** — on a winning response, one click hands the VAST XML to the VAST Player tab so you can watch the creative and fire trackers in the browser (instead of only server-side simulate playback).
 
 ### 3. DSP Settings
 
@@ -273,11 +281,42 @@ UI for the mock buyer (`dashboard/src/dsp_settings.jsx`):
 - **Advanced** custom `BidResponse` JSON
 - Live stats + **Send test bid** / **Reset stats**
 
-Reads `GET /api/dsp`, writes `POST /dsp/config`. Changes apply on the **next** request.
+Reads `GET /api/dsp`, writes `POST /dsp/config` (and `/dsps/{id}/…` for multi-DSP). Changes apply on the **next** request.
+
+### 4. VAST Player
+
+In-browser video ad player (`dashboard/src/vast_player.jsx` + `dashboard/src/vast/`). Paste or load a VAST tag, play the creative, and watch impression / quartile / click / error trackers fire in real time — the same lifecycle a real player would drive.
+
+**Load sources**
+
+| Source | How |
+|---|---|
+| Paste XML | Edit the VAST source box → **Load & Play** |
+| Built-in sample | **Load sample** (playable VAST 4.2 with public MP4 + `/dsps/dsp-1/track` pixels) |
+| Mock DSP creative | Pick a DSP → **Load from DSP** (`GET /dsps/{id}/vast`) |
+| Publisher win | From **Publisher Ad Request**, click **Open in VAST Player** on `winning_vast` |
+
+**What it does**
+
+1. Parses VAST 2/3/4 with the browser `DOMParser` (InLine + Wrapper detect; picks a playable `MediaFile`, preferring MP4).
+2. Plays the creative in an HTML `<video>` element (muted autoplay optional).
+3. On play / timeupdate / end / error / click, fires trackers in order: impression → start → firstQuartile → midpoint → thirdQuartile → complete → click.
+4. Substitutes common macros (`[CACHEBUSTING]`, `[CB]`, `[TIMESTAMP]`, `[ERRORCODE]`, `${AUCTION_PRICE}`, …) before firing.
+5. Beacons are plain image requests (no CORS dependency), matching how a real VAST player hits pixels.
+
+**UI panels**
+
+- **Player** — video controls + **Simulate click**
+- **Tracking diagram** — live lifecycle states (pending / fired / error)
+- **Events table** — timestamped log of each step
+- **Parsed VAST** — version, ad type, duration, media files, impression/tracking URLs
+- **Fire real tracking pixels** — when on, beacons hit the ad server and mock DSP so events show up on the Dashboard; when off, the timeline still advances without network hits
+
+Wrappers are detected and shown (with `VASTAdTagURI`); resolve the wrapped tag URI externally to play those creatives. Empty / no-fill VAST is reported as a parse note, not a crash.
 
 ### Dev proxy note
 
-Vite must proxy **both** `/api` and `/dsp`. Override the backend target with:
+Vite must proxy **`/api`**, **`/dsp`**, and **`/dsps`**. Override the backend target with:
 
 ```bash
 VITE_PROXY_TARGET=http://localhost:9999 npm run dev
@@ -576,5 +615,6 @@ Material capability added after the previous README commit (2026-07-09):
 - **Configurable creative + notice URLs** + **custom BidResponse** templates (`{{price}}`, …).
 - **Simulate playback** on Publisher Ad Request — server-side fire of winning trackers + win notices; returns `winning_vast` + playback stats.
 - **`AdResult.adm`** preserved end-to-end for inspection / VAST paste.
-- **Vite** proxies `/dsp` (and `VITE_PROXY_TARGET`) so the DSP Settings tab works in dev.
+- **Vite** proxies `/dsp` + `/dsps` (and `VITE_PROXY_TARGET`) so DSP Settings and VAST Player work in dev.
 - **`setup.md`** — dedicated local install guide.
+- **VAST Player** dashboard tab — in-browser play of VAST creatives with live impression/quartile/click beacon timeline; load from paste, sample, mock DSP (`/dsps/{id}/vast`), or **Open in VAST Player** from a Publisher win.
