@@ -5,7 +5,7 @@ cd /d "%~dp0backend"
 if not exist ".venv\Scripts\python.exe" (
   echo(
   echo   The simulator is not set up on this computer yet.
-  echo   Please ask a developer to do the one-time setup in HOW-TO-USE.md (section 12).
+  echo   Please ask a developer to do the one-time setup in setup.md.
   echo(
   pause
   exit /b 1

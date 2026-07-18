@@ -563,13 +563,15 @@ Use this when someone asks you to "test the simulator end to end":
 
 ## 18. One-time setup (for a developer, on a new computer)
 
-Only needed once, by someone technical. Full walkthrough also lives in `setup.md`.
+Only needed once. Follow the full simple guide in **[`setup.md`](setup.md)**.
+
+Short version:
 
 ```bash
 # 1. Backend
 cd ad-server-sim/backend
 python -m venv .venv
-.venv\Scripts\activate          # Windows
+.venv\Scripts\activate          # Windows  (Mac/Linux: source .venv/bin/activate)
 pip install -r requirements.txt
 copy .env.example .env          # then set AD_SERVER_EMAIL / AD_SERVER_PASSWORD to an ADMIN login
 

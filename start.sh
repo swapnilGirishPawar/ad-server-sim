@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")/backend"
 
 if [ ! -x ".venv/bin/python" ]; then
-  echo "The simulator is not set up yet. See HOW-TO-USE.md (section 12) for the one-time setup."
+  echo "The simulator is not set up yet. See setup.md for the one-time setup."
   exit 1
 fi
 
